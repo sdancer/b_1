@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blood 3D Explorer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a2e;
+            font-family: 'Segoe UI', sans-serif;
+            color: #eee;
+            overflow: hidden;
+        }
+
+        #container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        #header {
+            background: #16213e;
+            padding: 10px 20px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            border-bottom: 2px solid #e94560;
+        }
+
+        #header h1 {
+            font-size: 1.5em;
+            color: #e94560;
+        }
+
+        #controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        #mapSelect {
+            background: #0f3460;
+            color: #eee;
+            border: 1px solid #e94560;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            min-width: 200px;
+        }
+
+        #mapSelect:disabled {
+            background: #333;
+            color: #888;
+        }
+
+        .btn {
+            background: #e94560;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .btn:hover {
+            background: #ff6b6b;
+        }
+
+        .btn:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+
+        #status {
+            color: #888;
+            font-size: 14px;
+        }
+
+        #canvasContainer {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #0f0f23;
+        }
+
+        #glCanvas {
+            background: #000;
+        }
+
+        #info {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+
+        #help {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        #help kbd {
+            background: #333;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            padding: 30px 50px;
+            border-radius: 8px;
+            text-align: center;
+            z-index: 100;
+        }
+
+        #loading.hidden {
+            display: none;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #333;
+            border-top-color: #e94560;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="header">
+            <h1>Blood 3D Explorer</h1>
+            <div id="controls">
+                <select id="mapSelect" disabled>
+                    <option value="">Loading maps...</option>
+                </select>
+                <span id="status">Initializing...</span>
+            </div>
+        </div>
+        <div id="canvasContainer">
+            <canvas id="glCanvas" width="1024" height="768"></canvas>
+        </div>
+    </div>
+
+    <div id="info">
+        <div>Position: <span id="posX">0</span>, <span id="posY">0</span>, <span id="posZ">0</span></div>
+        <div>Angle: <span id="angle">0</span></div>
+        <div>FPS: <span id="fps">0</span></div>
+    </div>
+
+    <div id="help">
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</div>
+        <div><kbd>Q</kbd>/<kbd>Space</kbd> Up &nbsp; <kbd>E</kbd> Down</div>
+        <div><kbd>Arrows</kbd> Look/Turn</div>
+        <div><kbd>Shift</kbd> Fast move</div>
+        <div>Click canvas for mouse look</div>
+    </div>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <div id="loadingText">Loading Blood RFF...</div>
+    </div>
+
+    <script>
+        // =============================================================================
+        // Globals
+        // =============================================================================
+
+        let wasm = null;
+        let gl = null;
+        let rffData = null;
+        let rffEntries = [];
+        let mapList = [];
+        let running = false;
+
+        const keys = new Set();
+        let mouseDx = 0, mouseDy = 0;
+        let pointerLocked = false;
+
+        // =============================================================================
+        // RFF Parsing
+        // =============================================================================
+
+        const RFF_SIGNATURE = 0x1a464652;
+        const DICT_CRYPT = 16;
+
+        function cryptData(data, initialKey) {
+            let key = initialKey & 0xffff;
+            for (let i = 0; i < data.length; i++) {
+                data[i] ^= (key >> 1) & 0xff;
+                key = (key + 1) & 0xffff;
+            }
+        }
+
+        function decryptResource(data) {
+            const size = Math.min(data.length, 0x100);
+            const view = new Uint8Array(data.buffer, data.byteOffset, size);
+            cryptData(view, 0);
+        }
+
+        function parseRFF(buffer) {
+            const view = new DataView(buffer);
+
+            // Check signature
+            const sig = view.getUint32(0, true);
+            if (sig !== RFF_SIGNATURE) {
+                throw new Error('Invalid RFF signature');
+            }
+
+            const version = view.getUint16(4, true);
+            const dictOffset = view.getUint32(8, true);
+            const fileNum = view.getUint32(12, true);
+
+            console.log(`RFF v${version}, ${fileNum} files, dict at ${dictOffset}`);
+
+            // Check if dictionary is encrypted
+            const isEncrypted = (version & 0xff00) === 0x0300;
+
+            // Read dictionary
+            const dictSize = fileNum * 48;
+            const dictData = new Uint8Array(buffer, dictOffset, dictSize);
+            const dict = new Uint8Array(dictSize);
+            dict.set(dictData);
+
+            if (isEncrypted) {
+                const key = (dictOffset + ((version & 0xff) * dictOffset)) & 0xffff;
+                cryptData(dict, key);
+            }
+
+            // Parse entries
+            const entries = [];
+            const dictView = new DataView(dict.buffer);
+
+            for (let i = 0; i < fileNum; i++) {
+                const base = i * 48;
+                // Layout: unused1[16], offset[4], size[4], unused2[8], flags[1], type[3], name[8], id[4]
+                const offset = dictView.getUint32(base + 16, true);
+                const size = dictView.getUint32(base + 20, true);
+                const flags = dict[base + 32];
+
+                // Type: 3 bytes at offset 33
+                let type = '';
+                for (let j = 0; j < 3; j++) {
+                    const c = dict[base + 33 + j];
+                    if (c !== 0) type += String.fromCharCode(c);
+                }
+
+                // Name: 8 bytes at offset 36
+                let name = '';
+                for (let j = 0; j < 8; j++) {
+                    const c = dict[base + 36 + j];
+                    if (c !== 0) name += String.fromCharCode(c);
+                }
+
+                const id = dictView.getInt32(base + 44, true);
+
+                entries.push({ name, type, offset, size, flags, id });
+            }
+
+            return { version, entries, buffer };
+        }
+
+        function getMapList(entries) {
+            return entries
+                .filter(e => e.type.toUpperCase() === 'MAP')
+                .map(e => e.name)
+                .sort();
+        }
+
+        function getMapData(name) {
+            const entry = rffEntries.find(e =>
+                e.name.toUpperCase() === name.toUpperCase() &&
+                e.type.toUpperCase() === 'MAP'
+            );
+
+            if (!entry) return null;
+
+            // Copy data
+            const data = new Uint8Array(entry.size);
+            data.set(new Uint8Array(rffData, entry.offset, entry.size));
+
+            // Decrypt if needed
+            if (entry.flags & DICT_CRYPT) {
+                decryptResource(data);
+            }
+
+            return data;
+        }
+
+        // =============================================================================
+        // WebGL Immediate Mode Emulation
+        // =============================================================================
+
+        let currentColor = [1, 1, 1, 1];
+        let vertices = [];
+        let colors = [];
+        let currentMode = null;
+
+        let projectionMatrix = mat4Identity();
+        let modelviewMatrix = mat4Identity();
+        let matrixMode = 0x1701; // GL_PROJECTION
+        let matrixStack = { projection: [], modelview: [] };
+
+        function mat4Identity() {
+            return [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+        }
+
+        function mat4Multiply(a, b) {
+            const out = new Array(16);
+            for (let i = 0; i < 4; i++) {
+                for (let j = 0; j < 4; j++) {
+                    out[i*4+j] = 0;
+                    for (let k = 0; k < 4; k++) {
+                        out[i*4+j] += a[i*4+k] * b[k*4+j];
+                    }
+                }
+            }
+            return out;
+        }
+
+        function mat4Rotate(m, angle, x, y, z) {
+            const rad = angle * Math.PI / 180;
+            const c = Math.cos(rad), s = Math.sin(rad);
+            const len = Math.sqrt(x*x + y*y + z*z);
+            x /= len; y /= len; z /= len;
+
+            const rot = [
+                x*x*(1-c)+c,   x*y*(1-c)-z*s, x*z*(1-c)+y*s, 0,
+                y*x*(1-c)+z*s, y*y*(1-c)+c,   y*z*(1-c)-x*s, 0,
+                z*x*(1-c)-y*s, z*y*(1-c)+x*s, z*z*(1-c)+c,   0,
+                0, 0, 0, 1
+            ];
+            return mat4Multiply(m, rot);
+        }
+
+        function mat4Translate(m, x, y, z) {
+            const t = [1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1];
+            return mat4Multiply(m, t);
+        }
+
+        let shaderProgram = null;
+        let positionBuffer = null;
+        let colorBuffer = null;
+
+        function initShaders() {
+            const vsSource = `
+                attribute vec3 aPosition;
+                attribute vec4 aColor;
+                uniform mat4 uProjection;
+                uniform mat4 uModelView;
+                varying vec4 vColor;
+                void main() {
+                    gl_Position = uProjection * uModelView * vec4(aPosition, 1.0);
+                    vColor = aColor;
+                }
+            `;
+
+            const fsSource = `
+                precision mediump float;
+                varying vec4 vColor;
+                void main() {
+                    gl_FragColor = vColor;
+                }
+            `;
+
+            const vs = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vs, vsSource);
+            gl.compileShader(vs);
+
+            const fs = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fs, fsSource);
+            gl.compileShader(fs);
+
+            shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vs);
+            gl.attachShader(shaderProgram, fs);
+            gl.linkProgram(shaderProgram);
+            gl.useProgram(shaderProgram);
+
+            positionBuffer = gl.createBuffer();
+            colorBuffer = gl.createBuffer();
+        }
+
+        function flushVertices() {
+            if (vertices.length === 0) return;
+
+            const posLoc = gl.getAttribLocation(shaderProgram, 'aPosition');
+            const colLoc = gl.getAttribLocation(shaderProgram, 'aColor');
+            const projLoc = gl.getUniformLocation(shaderProgram, 'uProjection');
+            const mvLoc = gl.getUniformLocation(shaderProgram, 'uModelView');
+
+            gl.uniformMatrix4fv(projLoc, false, new Float32Array(projectionMatrix));
+            gl.uniformMatrix4fv(mvLoc, false, new Float32Array(modelviewMatrix));
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.DYNAMIC_DRAW);
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.DYNAMIC_DRAW);
+            gl.enableVertexAttribArray(colLoc);
+            gl.vertexAttribPointer(colLoc, 4, gl.FLOAT, false, 0, 0);
+
+            let mode = gl.TRIANGLES;
+            if (currentMode === 0x0001) mode = gl.LINES;
+            else if (currentMode === 0x0002) mode = gl.LINE_LOOP;
+            else if (currentMode === 0x0006) mode = gl.TRIANGLE_FAN;
+
+            gl.drawArrays(mode, 0, vertices.length / 3);
+
+            vertices = [];
+            colors = [];
+        }
+
+        // =============================================================================
+        // WebGL Imports for WASM
+        // =============================================================================
+
+        const webglImports = {
+            glClear: (mask) => {
+                gl.clear(mask);
+            },
+            glClearColor: (r, g, b, a) => {
+                gl.clearColor(r, g, b, a);
+            },
+            glClearDepth: (d) => {
+                gl.clearDepth(d);
+            },
+            glEnable: (cap) => {
+                // GL_TEXTURE_2D (0x0DE1) is not a valid capability in WebGL
+                if (cap !== 0x0DE1) gl.enable(cap);
+            },
+            glDisable: (cap) => {
+                // GL_TEXTURE_2D (0x0DE1) is not a valid capability in WebGL
+                if (cap !== 0x0DE1) gl.disable(cap);
+            },
+            glDepthFunc: (func) => {
+                gl.depthFunc(func);
+            },
+            glDepthMask: (flag) => {
+                gl.depthMask(flag !== 0);
+            },
+            glBlendFunc: (s, d) => {
+                gl.blendFunc(s, d);
+            },
+            glCullFace: (mode) => {
+                gl.cullFace(mode);
+            },
+            glFrontFace: (mode) => {
+                gl.frontFace(mode);
+            },
+            glViewport: (x, y, w, h) => {
+                gl.viewport(x, y, w, h);
+            },
+            glLoadIdentity: () => {
+                if (matrixMode === 0x1701) projectionMatrix = mat4Identity();
+                else modelviewMatrix = mat4Identity();
+            },
+            glMatrixMode: (mode) => {
+                matrixMode = mode;
+            },
+            glLoadMatrixf: (ptr) => {
+                const m = [];
+                for (let i = 0; i < 16; i++) {
+                    m.push(new Float32Array(wasm.instance.exports.memory.buffer, ptr + i*4, 1)[0]);
+                }
+                if (matrixMode === 0x1701) projectionMatrix = m;
+                else modelviewMatrix = m;
+            },
+            glRotatef: (angle, x, y, z) => {
+                if (matrixMode === 0x1701) projectionMatrix = mat4Rotate(projectionMatrix, angle, x, y, z);
+                else modelviewMatrix = mat4Rotate(modelviewMatrix, angle, x, y, z);
+            },
+            glTranslatef: (x, y, z) => {
+                if (matrixMode === 0x1701) projectionMatrix = mat4Translate(projectionMatrix, x, y, z);
+                else modelviewMatrix = mat4Translate(modelviewMatrix, x, y, z);
+            },
+            glBegin: (mode) => {
+                currentMode = mode;
+                vertices = [];
+                colors = [];
+            },
+            glEnd: () => {
+                flushVertices();
+                currentMode = null;
+            },
+            glVertex3f: (x, y, z) => {
+                vertices.push(x, y, z);
+                colors.push(...currentColor);
+            },
+            glColor3f: (r, g, b) => {
+                currentColor = [r, g, b, 1];
+            },
+            glColor4f: (r, g, b, a) => {
+                currentColor = [r, g, b, a];
+            }
+        };
+
+        // =============================================================================
+        // Environment Imports for WASM
+        // =============================================================================
+
+        const SCANCODE_MAP = {
+            'KeyW': 26, 'KeyA': 4, 'KeyS': 22, 'KeyD': 7,
+            'KeyQ': 20, 'KeyE': 8,
+            'ArrowUp': 82, 'ArrowDown': 81, 'ArrowLeft': 80, 'ArrowRight': 79,
+            'ShiftLeft': 225, 'ShiftRight': 225,
+            'Space': 44, 'Escape': 41
+        };
+
+        const envImports = {
+            consoleLog: (ptr, len) => {
+                const bytes = new Uint8Array(wasm.instance.exports.memory.buffer, ptr, len);
+                console.log(new TextDecoder().decode(bytes));
+            },
+            consoleError: (ptr, len) => {
+                const bytes = new Uint8Array(wasm.instance.exports.memory.buffer, ptr, len);
+                console.error(new TextDecoder().decode(bytes));
+            },
+            getCanvasWidth: () => gl.canvas.width,
+            getCanvasHeight: () => gl.canvas.height,
+            getTimeMs: () => performance.now(),
+            isKeyPressed: (scancode) => {
+                for (const [code, sc] of Object.entries(SCANCODE_MAP)) {
+                    if (sc === scancode && keys.has(code)) return true;
+                }
+                return false;
+            },
+            getMouseDeltaX: () => mouseDx,
+            getMouseDeltaY: () => mouseDy,
+            resetMouseDelta: () => { mouseDx = 0; mouseDy = 0; }
+        };
+
+        // =============================================================================
+        // Main
+        // =============================================================================
+
+        async function init() {
+            const canvas = document.getElementById('glCanvas');
+            gl = canvas.getContext('webgl', { antialias: true, depth: true });
+
+            if (!gl) {
+                setStatus('WebGL not supported');
+                return;
+            }
+
+            initShaders();
+
+            // Input handlers
+            document.addEventListener('keydown', e => {
+                keys.add(e.code);
+                if (e.code === 'Escape' && pointerLocked) {
+                    document.exitPointerLock();
+                }
+            });
+            document.addEventListener('keyup', e => keys.delete(e.code));
+
+            canvas.addEventListener('click', () => {
+                canvas.requestPointerLock();
+            });
+
+            document.addEventListener('pointerlockchange', () => {
+                pointerLocked = document.pointerLockElement === canvas;
+            });
+
+            document.addEventListener('mousemove', e => {
+                if (pointerLocked) {
+                    mouseDx += e.movementX;
+                    mouseDy += e.movementY;
+                }
+            });
+
+            // Resize handler
+            function resize() {
+                const container = document.getElementById('canvasContainer');
+                canvas.width = container.clientWidth;
+                canvas.height = container.clientHeight;
+            }
+            window.addEventListener('resize', resize);
+            resize();
+
+            setLoading('Loading Blood RFF...');
+
+            try {
+                // Load RFF
+                const rffResponse = await fetch('data/blood.rff');
+                if (!rffResponse.ok) throw new Error('Failed to load blood.rff');
+                const rffBuffer = await rffResponse.arrayBuffer();
+
+                const rff = parseRFF(rffBuffer);
+                rffData = rffBuffer;
+                rffEntries = rff.entries;
+                mapList = getMapList(rff.entries);
+
+                console.log(`Found ${mapList.length} maps`);
+
+                // Populate map selector
+                const select = document.getElementById('mapSelect');
+                select.innerHTML = '<option value="">-- Select a map --</option>';
+                for (const name of mapList) {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    select.appendChild(opt);
+                }
+                select.disabled = false;
+
+                // Load WASM
+                setLoading('Loading WASM...');
+                const wasmResponse = await fetch('explore3d.wasm');
+                const wasmBuffer = await wasmResponse.arrayBuffer();
+
+                wasm = await WebAssembly.instantiate(wasmBuffer, {
+                    env: envImports,
+                    webgl: webglImports
+                });
+
+                wasm.instance.exports.init();
+
+                hideLoading();
+                setStatus('Select a map to explore');
+
+                // Map selection handler
+                select.addEventListener('change', () => {
+                    const mapName = select.value;
+                    if (mapName) {
+                        loadMap(mapName);
+                    }
+                });
+
+                // Auto-load first map (E1M1 if available, otherwise first map)
+                const defaultMap = mapList.includes('E1M1') ? 'E1M1' : mapList[0];
+                if (defaultMap) {
+                    select.value = defaultMap;
+                    loadMap(defaultMap);
+                }
+
+            } catch (err) {
+                console.error(err);
+                setStatus('Error: ' + err.message);
+                hideLoading();
+            }
+        }
+
+        function loadMap(name) {
+            setStatus(`Loading ${name}...`);
+
+            const mapData = getMapData(name);
+            if (!mapData) {
+                setStatus(`Map ${name} not found`);
+                return;
+            }
+
+            // Allocate memory in WASM and copy map data
+            const ptr = wasm.instance.exports.allocate(mapData.length);
+            if (!ptr) {
+                setStatus('Failed to allocate memory');
+                return;
+            }
+
+            const wasmMem = new Uint8Array(wasm.instance.exports.memory.buffer, ptr, mapData.length);
+            wasmMem.set(mapData);
+
+            // Load the map
+            const success = wasm.instance.exports.loadMapData(ptr, mapData.length);
+
+            // Free the temporary buffer
+            wasm.instance.exports.deallocate(ptr, mapData.length);
+
+            if (success) {
+                setStatus(`Exploring ${name}`);
+                if (!running) {
+                    running = true;
+                    requestAnimationFrame(frame);
+                }
+            } else {
+                setStatus(`Failed to load ${name}`);
+            }
+        }
+
+        let lastTime = performance.now();
+        let frameCount = 0;
+        let fpsTime = 0;
+
+        function frame(time) {
+            if (!running) return;
+
+            wasm.instance.exports.frame();
+
+            // Update position display
+            document.getElementById('posX').textContent = wasm.instance.exports.getPlayerX();
+            document.getElementById('posY').textContent = wasm.instance.exports.getPlayerY();
+            document.getElementById('posZ').textContent = wasm.instance.exports.getPlayerZ();
+            document.getElementById('angle').textContent = wasm.instance.exports.getPlayerAng();
+
+            // FPS counter
+            frameCount++;
+            fpsTime += time - lastTime;
+            lastTime = time;
+            if (fpsTime >= 1000) {
+                document.getElementById('fps').textContent = frameCount;
+                frameCount = 0;
+                fpsTime = 0;
+            }
+
+            requestAnimationFrame(frame);
+        }
+
+        function setStatus(text) {
+            document.getElementById('status').textContent = text;
+        }
+
+        function setLoading(text) {
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('loadingText').textContent = text;
+        }
+
+        function hideLoading() {
+            document.getElementById('loading').classList.add('hidden');
+        }
+
+        init();
+    </script>
+</body>
+</html>
