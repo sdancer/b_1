@@ -1,6 +1,18 @@
 # Zig build artifacts
 zig-out/
+zig-cache/
 .zig-cache/
+
+# Generated WASM
+web/explore3d.wasm
+
+# Game data files (not for redistribution)
+web/data/
+
+# Generated images
+*.bmp
+*.ppm
+*.png
 
 # Editor files
 *.swp
