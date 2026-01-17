@@ -230,6 +230,28 @@ pub var globalvisibility: i32 = 0;
 pub var globalflags: i32 = 0;
 
 // =============================================================================
+// Camera/View Position (used by renderers)
+// =============================================================================
+
+/// Camera X position in BUILD units
+pub var globalposx: i32 = 0;
+
+/// Camera Y position in BUILD units
+pub var globalposy: i32 = 0;
+
+/// Camera Z position in BUILD units (negative = higher)
+pub var globalposz: i32 = 0;
+
+/// Camera angle (0-2047, BUILD angle units)
+pub var globalang: i16 = 0;
+
+/// Camera horizon (look up/down, 100 = level)
+pub var globalhoriz: types.Fix16 = types.fix16FromInt(100);
+
+/// Current sector the camera is in
+pub var globalcursectnum: i16 = 0;
+
+// =============================================================================
 // Hitscan Goal
 // =============================================================================
 
