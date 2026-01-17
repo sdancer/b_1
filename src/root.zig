@@ -45,6 +45,7 @@ pub const engine = struct {
     pub const sprite = @import("engine/sprite.zig");
     pub const rotatesprite = @import("engine/rotatesprite.zig");
     pub const yax = @import("engine/yax.zig");
+    pub const player = @import("engine/player.zig");
 };
 
 /// Polymost renderer (OpenGL 1.x/2.0)
@@ -54,6 +55,9 @@ pub const polymost = struct {
     pub const ptypes = @import("polymost/types.zig");
     pub const state = @import("polymost/state.zig");
     pub const buffer = @import("polymost/buffer.zig");
+    pub const pm_globals = @import("polymost/globals.zig");
+    pub const texcoord = @import("polymost/texcoord.zig");
+    pub const draw = @import("polymost/draw.zig");
 };
 
 /// Polymer renderer (Advanced OpenGL with dynamic lighting)
@@ -61,6 +65,20 @@ pub const polymer = struct {
     pub const render = @import("polymer/render.zig");
     pub const lights = @import("polymer/lights.zig");
     pub const ptypes = @import("polymer/types.zig");
+};
+
+/// File system / resource loading
+pub const fs = struct {
+    pub const reader = @import("fs/reader.zig");
+    pub const map = @import("fs/map.zig");
+    pub const art = @import("fs/art.zig");
+    pub const rff = @import("fs/rff.zig");
+};
+
+/// Platform layer (SDL2, input)
+pub const platform = struct {
+    pub const sdl = @import("platform/sdl.zig");
+    pub const input = @import("platform/input.zig");
 };
 
 // =============================================================================
@@ -172,6 +190,32 @@ pub const isValidWall = globals.isValidWall;
 pub const isValidSprite = globals.isValidSprite;
 
 // =============================================================================
+// File Loading
+// =============================================================================
+
+pub const loadMap = @import("fs/map.zig").loadMap;
+pub const loadMapFromFile = @import("fs/map.zig").loadMapFromFile;
+pub const loadBloodMap = @import("fs/map.zig").loadBloodMap;
+pub const loadBuildMap = @import("fs/map.zig").loadBuildMap;
+pub const MapData = @import("fs/map.zig").MapData;
+
+pub const loadArt = @import("fs/art.zig").loadArt;
+pub const loadArtFromFile = @import("fs/art.zig").loadArtFromFile;
+pub const ArtData = @import("fs/art.zig").ArtData;
+pub const getTileSizeX = @import("fs/art.zig").getTileSizeX;
+pub const getTileSizeY = @import("fs/art.zig").getTileSizeY;
+pub const isTileValid = @import("fs/art.zig").isTileValid;
+pub const loadPalette = @import("fs/art.zig").loadPalette;
+pub const loadPaletteFromFile = @import("fs/art.zig").loadPaletteFromFile;
+
+pub const BinaryReader = @import("fs/reader.zig").BinaryReader;
+pub const loadFile = @import("fs/reader.zig").loadFile;
+
+pub const loadRFF = @import("fs/rff.zig").loadRFF;
+pub const loadRFFFromFile = @import("fs/rff.zig").loadRFFFromFile;
+pub const RFFArchive = @import("fs/rff.zig").RFFArchive;
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -189,6 +233,11 @@ test {
     // Polymer types and lights (minimal GL dependencies in tests)
     _ = @import("polymer/types.zig");
     _ = @import("polymer/lights.zig");
+    // File system / resource loading
+    _ = @import("fs/reader.zig");
+    _ = @import("fs/map.zig");
+    _ = @import("fs/art.zig");
+    _ = @import("fs/rff.zig");
     // Note: The following modules require GL context and are tested separately:
     // - gl/state.zig
     // - engine/render.zig, view.zig, rotatesprite.zig

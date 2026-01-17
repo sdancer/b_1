@@ -1,0 +1,353 @@
+//! Polymost Texture Test Demo
+//!
+//! A simple SDL2+OpenGL application that loads a Blood map and renders it
+//! with textures using the polymost renderer.
+//!
+//! Usage:
+//!   ./test_polymost --rff <path/to/blood.rff> <mapname>
+//!   ./test_polymost --map <path/to/map.map>
+//!
+//! Controls:
+//!   W/S - Move forward/backward
+//!   A/D - Strafe left/right
+//!   Left/Right arrows - Turn
+//!   Up/Down arrows - Look up/down
+//!   T - Toggle textures on/off
+//!   Escape - Quit
+
+const std = @import("std");
+const build_engine = @import("build_engine");
+
+const types = build_engine.types;
+const constants = build_engine.constants;
+const globals = build_engine.globals;
+const fs = build_engine.fs;
+const polymost = build_engine.polymost;
+const platform = build_engine.platform;
+const engine = build_engine.engine;
+const art = build_engine.fs.art;
+
+// =============================================================================
+// SDL2 C Bindings
+// =============================================================================
+
+const c = @cImport({
+    @cInclude("SDL2/SDL.h");
+});
+
+// =============================================================================
+// Main Application
+// =============================================================================
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Parse command line arguments
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    if (args.len < 3) {
+        std.debug.print("Usage: {s} --rff <blood.rff> <mapname>\n", .{args[0]});
+        std.debug.print("       {s} --map <mapfile.map>\n", .{args[0]});
+        return;
+    }
+
+    // Initialize BUILD engine
+    build_engine.init();
+
+    // Load data based on arguments
+    var map_loaded = false;
+
+    if (std.mem.eql(u8, args[1], "--rff") and args.len >= 4) {
+        const rff_path = args[2];
+        const map_name = args[3];
+
+        std.debug.print("Loading RFF: {s}\n", .{rff_path});
+
+        // Load RFF archive
+        var rff = fs.rff.loadRFFFromFile(allocator, rff_path) catch |err| {
+            std.debug.print("Failed to load RFF: {}\n", .{err});
+            return;
+        };
+        defer rff.deinit();
+
+        std.debug.print("RFF loaded: {} entries\n", .{rff.entries.len});
+
+        // Load palette
+        if (rff.getEntry("PALETTE.DAT")) |pal_entry| {
+            if (rff.extractEntry(allocator, pal_entry)) |pal_data| {
+                defer allocator.free(pal_data);
+                if (pal_data.len >= 768) {
+                    @memcpy(&globals.globals.palette, pal_data[0..768]);
+                    globals.globals.numshades = 64; // Blood uses 64 shade levels
+                    std.debug.print("Palette loaded\n", .{});
+                }
+            } else |_| {
+                std.debug.print("Failed to extract palette\n", .{});
+            }
+        }
+
+        // Load ART files
+        var art_count: u32 = 0;
+        for (0..20) |file_idx| {
+            var name_buf: [32]u8 = undefined;
+            const art_name = art.getArtFilename(&name_buf, @intCast(file_idx));
+
+            // Try uppercase first
+            var upper_name: [32]u8 = undefined;
+            for (art_name, 0..) |ch, i| {
+                upper_name[i] = std.ascii.toUpper(ch);
+            }
+
+            if (rff.getEntry(upper_name[0..art_name.len])) |art_entry| {
+                if (rff.extractEntry(allocator, art_entry)) |art_data| {
+                    defer allocator.free(art_data);
+                    if (fs.art.loadArt(allocator, art_data)) |art_file| {
+                        var storage = allocator.alloc(u8, fs.art.calculateStorageNeeded(&art_file)) catch continue;
+                        fs.art.loadTilesToGlobals(&art_file, storage);
+                        art_count += 1;
+                        var temp = art_file;
+                        temp.deinit();
+                    } else |_| {}
+                } else |_| {}
+            }
+        }
+        std.debug.print("Loaded {} ART files\n", .{art_count});
+
+        // Try to load map
+        var map_buf: [64]u8 = undefined;
+        const map_filename = std.fmt.bufPrint(&map_buf, "{s}.MAP", .{map_name}) catch map_name;
+
+        if (rff.getEntry(map_filename)) |map_entry| {
+            if (rff.extractEntry(allocator, map_entry)) |map_data| {
+                defer allocator.free(map_data);
+
+                var map_result = fs.map.loadBloodMap(allocator, map_data) catch |err| {
+                    std.debug.print("Failed to parse map: {}\n", .{err});
+                    return;
+                };
+                defer map_result.deinit(allocator);
+
+                // Apply map data to globals
+                globals.globals.numsectors = map_result.numsectors;
+                globals.globals.numwalls = map_result.numwalls;
+                globals.globals.Numsprites = map_result.numsprites;
+
+                for (0..@as(usize, @intCast(map_result.numsectors))) |i| {
+                    globals.globals.sector[i] = map_result.sectors[i];
+                }
+                for (0..@as(usize, @intCast(map_result.numwalls))) |i| {
+                    globals.globals.wall[i] = map_result.walls[i];
+                }
+                for (0..@as(usize, @intCast(map_result.numsprites))) |i| {
+                    globals.globals.sprite[i] = map_result.sprites[i];
+                }
+
+                globals.globals.globalposx = map_result.start_pos.x;
+                globals.globals.globalposy = map_result.start_pos.y;
+                globals.globals.globalposz = map_result.start_pos.z;
+                globals.globals.globalang = @intCast(map_result.start_ang);
+                globals.globals.globalcursectnum = @intCast(map_result.start_sectnum);
+
+                map_loaded = true;
+                std.debug.print("Map loaded: {s}\n", .{map_name});
+                std.debug.print("  Sectors: {}, Walls: {}, Sprites: {}\n", .{
+                    map_result.numsectors,
+                    map_result.numwalls,
+                    map_result.numsprites,
+                });
+            } else |err| {
+                std.debug.print("Failed to extract map: {}\n", .{err});
+            }
+        } else {
+            std.debug.print("Map not found in RFF: {s}\n", .{map_filename});
+        }
+    } else if (std.mem.eql(u8, args[1], "--map")) {
+        const map_path = args[2];
+        std.debug.print("Loading map: {s}\n", .{map_path});
+
+        var map_result = fs.map.loadMapFromFile(allocator, map_path) catch |err| {
+            std.debug.print("Failed to load map: {}\n", .{err});
+            return;
+        };
+        defer map_result.deinit(allocator);
+
+        globals.globals.numsectors = map_result.numsectors;
+        globals.globals.numwalls = map_result.numwalls;
+        globals.globals.Numsprites = map_result.numsprites;
+
+        for (0..@as(usize, @intCast(map_result.numsectors))) |i| {
+            globals.globals.sector[i] = map_result.sectors[i];
+        }
+        for (0..@as(usize, @intCast(map_result.numwalls))) |i| {
+            globals.globals.wall[i] = map_result.walls[i];
+        }
+        for (0..@as(usize, @intCast(map_result.numsprites))) |i| {
+            globals.globals.sprite[i] = map_result.sprites[i];
+        }
+
+        globals.globals.globalposx = map_result.start_pos.x;
+        globals.globals.globalposy = map_result.start_pos.y;
+        globals.globals.globalposz = map_result.start_pos.z;
+        globals.globals.globalang = @intCast(map_result.start_ang);
+        globals.globals.globalcursectnum = @intCast(map_result.start_sectnum);
+
+        map_loaded = true;
+    }
+
+    if (!map_loaded) {
+        std.debug.print("No map loaded!\n", .{});
+        return;
+    }
+
+    // Initialize SDL
+    if (c.SDL_Init(c.SDL_INIT_VIDEO) != 0) {
+        std.debug.print("SDL_Init failed\n", .{});
+        return;
+    }
+    defer c.SDL_Quit();
+
+    // Set OpenGL attributes
+    _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    _ = c.SDL_GL_SetAttribute(c.SDL_GL_DOUBLEBUFFER, 1);
+    _ = c.SDL_GL_SetAttribute(c.SDL_GL_DEPTH_SIZE, 24);
+
+    // Create window
+    const window = c.SDL_CreateWindow(
+        "Polymost Texture Test",
+        c.SDL_WINDOWPOS_CENTERED,
+        c.SDL_WINDOWPOS_CENTERED,
+        1280,
+        720,
+        c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_SHOWN,
+    );
+    if (window == null) {
+        std.debug.print("SDL_CreateWindow failed\n", .{});
+        return;
+    }
+    defer c.SDL_DestroyWindow(window);
+
+    // Create GL context
+    const gl_context = c.SDL_GL_CreateContext(window);
+    if (gl_context == null) {
+        std.debug.print("SDL_GL_CreateContext failed\n", .{});
+        return;
+    }
+    defer c.SDL_GL_DeleteContext(gl_context);
+
+    // Enable VSync
+    _ = c.SDL_GL_SetSwapInterval(1);
+
+    // Set up initial viewport
+    globals.globals.xdim = 1280;
+    globals.globals.ydim = 720;
+    globals.globals.viewingrange = 65536;
+    globals.globals.yxaspect = 65536;
+    globals.globals.globalhoriz = types.fix16FromInt(100);
+
+    // Initialize polymost
+    _ = polymost.render.polymost_init();
+
+    std.debug.print("\nControls:\n", .{});
+    std.debug.print("  W/S - Move forward/backward\n", .{});
+    std.debug.print("  A/D - Strafe left/right\n", .{});
+    std.debug.print("  Left/Right arrows - Turn\n", .{});
+    std.debug.print("  Up/Down arrows - Look up/down\n", .{});
+    std.debug.print("  T - Toggle textures\n", .{});
+    std.debug.print("  Escape - Quit\n", .{});
+
+    // Main loop
+    var running = true;
+    var last_time = c.SDL_GetTicks();
+
+    while (running) {
+        // Handle events
+        var event: c.SDL_Event = undefined;
+        while (c.SDL_PollEvent(&event) != 0) {
+            if (event.type == c.SDL_QUIT) {
+                running = false;
+            } else if (event.type == c.SDL_KEYDOWN) {
+                switch (event.key.keysym.sym) {
+                    c.SDLK_ESCAPE => running = false,
+                    c.SDLK_t => {
+                        polymost.render.use_textures = !polymost.render.use_textures;
+                        std.debug.print("Textures: {}\n", .{if (polymost.render.use_textures) "ON" else "OFF"});
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        // Calculate delta time
+        const current_time = c.SDL_GetTicks();
+        const dt: f32 = @as(f32, @floatFromInt(current_time - last_time)) / 1000.0;
+        last_time = current_time;
+
+        // Get keyboard state for movement
+        const keys = c.SDL_GetKeyboardState(null);
+
+        // Movement speed
+        const move_speed: i32 = @intFromFloat(50000.0 * dt);
+        const turn_speed: i16 = @intFromFloat(512.0 * dt);
+        const look_speed: i32 = @intFromFloat(50.0 * dt);
+
+        // Calculate forward/side vectors
+        const ang = globals.globals.globalang;
+        const cos_ang = globals.globals.getSin(ang + 512); // cos = sin(ang + 90)
+        const sin_ang = globals.globals.getSin(ang);
+
+        // Forward/backward
+        if (keys[c.SDL_SCANCODE_W] != 0) {
+            globals.globals.globalposx += @divTrunc(cos_ang * move_speed, 16384);
+            globals.globals.globalposy += @divTrunc(sin_ang * move_speed, 16384);
+        }
+        if (keys[c.SDL_SCANCODE_S] != 0) {
+            globals.globals.globalposx -= @divTrunc(cos_ang * move_speed, 16384);
+            globals.globals.globalposy -= @divTrunc(sin_ang * move_speed, 16384);
+        }
+
+        // Strafe left/right
+        if (keys[c.SDL_SCANCODE_A] != 0) {
+            globals.globals.globalposx -= @divTrunc(sin_ang * move_speed, 16384);
+            globals.globals.globalposy += @divTrunc(cos_ang * move_speed, 16384);
+        }
+        if (keys[c.SDL_SCANCODE_D] != 0) {
+            globals.globals.globalposx += @divTrunc(sin_ang * move_speed, 16384);
+            globals.globals.globalposy -= @divTrunc(cos_ang * move_speed, 16384);
+        }
+
+        // Turn
+        if (keys[c.SDL_SCANCODE_LEFT] != 0) {
+            globals.globals.globalang = @intCast((@as(i32, globals.globals.globalang) - turn_speed) & 2047);
+        }
+        if (keys[c.SDL_SCANCODE_RIGHT] != 0) {
+            globals.globals.globalang = @intCast((@as(i32, globals.globals.globalang) + turn_speed) & 2047);
+        }
+
+        // Look up/down
+        var horiz = types.fix16ToInt(globals.globals.globalhoriz);
+        if (keys[c.SDL_SCANCODE_UP] != 0) {
+            horiz = @min(199, horiz + look_speed);
+        }
+        if (keys[c.SDL_SCANCODE_DOWN] != 0) {
+            horiz = @max(1, horiz - look_speed);
+        }
+        globals.globals.globalhoriz = types.fix16FromInt(horiz);
+
+        // Clear screen
+        const gl = build_engine.gl.bindings;
+        gl.glClearColor(0.1, 0.1, 0.2, 1.0);
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
+
+        // Render the scene
+        polymost.render.polymost_drawrooms();
+
+        // Swap buffers
+        c.SDL_GL_SwapWindow(window);
+    }
+
+    std.debug.print("Shutting down...\n", .{});
+}

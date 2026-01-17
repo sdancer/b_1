@@ -12,6 +12,8 @@ const enums = @import("../enums.zig");
 const gl_state = @import("../gl/state.zig");
 const gl = @import("../gl/bindings.zig");
 const polymost_types = @import("types.zig");
+const art = @import("../fs/art.zig");
+const pm_globals = @import("globals.zig");
 
 const PthType = polymost_types.PthType;
 const ColType = polymost_types.ColType;
@@ -305,7 +307,16 @@ pub fn uploadPalSwap(palookupnum: i32) void {
 // Tile Loading
 // =============================================================================
 
+/// Next power of 2 >= n
+fn nextPow2(n: i16) i32 {
+    if (n <= 0) return 1;
+    var val: i32 = 1;
+    while (val < n) : (val <<= 1) {}
+    return val;
+}
+
 /// Load an ART tile into a texture
+/// Port from: polymost.cpp gloadtile_art() lines 2123-2290
 pub fn gloadtile_art(
     picnum: i32,
     pal: i32,
@@ -314,27 +325,177 @@ pub fn gloadtile_art(
     pth: *PthType,
     doalloc: i32,
 ) void {
-    _ = shade;
-    _ = pal;
-    _ = picnum;
-    _ = doalloc;
+    // Validate picnum
+    if (picnum < 0 or picnum >= constants.MAXTILES) {
+        createPlaceholderTexture(pth, dameth);
+        return;
+    }
 
-    // This would load tile data from the ART files
-    // For now, create a placeholder texture
+    const idx: usize = @intCast(picnum);
 
+    // Get tile dimensions
+    const tsizx = art.tilesizx[idx];
+    const tsizy = art.tilesizy[idx];
+
+    if (tsizx <= 0 or tsizy <= 0) {
+        createPlaceholderTexture(pth, dameth);
+        return;
+    }
+
+    // Get tile pixel data
+    const pixels = art.tiledata[idx] orelse {
+        createPlaceholderTexture(pth, dameth);
+        return;
+    };
+
+    // Calculate texture size (power of 2 for compatibility)
+    const sizx: i32 = nextPow2(tsizx);
+    const sizy: i32 = nextPow2(tsizy);
+    const tsizx_i32: i32 = tsizx;
+    const tsizy_i32: i32 = tsizy;
+
+    // Allocate RGBA buffer
+    const buf_size: usize = @intCast(sizx * sizy);
+    var rgba_buf = std.heap.page_allocator.alloc(ColType, buf_size) catch {
+        createPlaceholderTexture(pth, dameth);
+        return;
+    };
+    defer std.heap.page_allocator.free(rgba_buf);
+
+    // Clear buffer (for padding when tile < texture size)
+    @memset(rgba_buf, ColType{ .r = 0, .g = 0, .b = 0, .a = 0 });
+
+    // Get palette (base palette from engine globals)
+    const palette_data = &globals.palette;
+
+    // Get palookup (shade table) if available
+    const pal_idx: usize = if (pal >= 0 and pal < constants.MAXPALOOKUPS) @intCast(pal) else 0;
+    const palookup_ptr = globals.palookup[pal_idx];
+
+    // Shade clamping
+    const numshades_i32: i32 = globals.numshades;
+    const actual_shade: i32 = if (numshades_i32 > 0)
+        std.math.clamp(shade, 0, numshades_i32 - 1)
+    else
+        0;
+
+    // Convert tile pixels to RGBA
+    // BUILD tiles are stored column-major (x is outer loop)
+    for (0..@as(usize, @intCast(tsizx_i32))) |tx| {
+        for (0..@as(usize, @intCast(tsizy_i32))) |ty| {
+            // BUILD stores columns: pixel[x][y] = data[x * sizy + y]
+            const src_idx = tx * @as(usize, @intCast(tsizy_i32)) + ty;
+            // OpenGL expects row-major
+            const dst_idx = ty * @as(usize, @intCast(sizx)) + tx;
+
+            if (src_idx >= @as(usize, @intCast(tsizx_i32 * tsizy_i32))) continue;
+            if (dst_idx >= buf_size) continue;
+
+            const color_idx = pixels[src_idx];
+
+            // Index 255 is transparent in BUILD engine
+            if (color_idx == 255) {
+                rgba_buf[dst_idx] = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+                continue;
+            }
+
+            // Apply shade through palookup if available
+            var final_idx: u8 = color_idx;
+            if (palookup_ptr) |lut| {
+                const shade_offset: usize = @intCast(actual_shade * 256);
+                final_idx = lut[shade_offset + color_idx];
+            }
+
+            // Look up in base palette (6-bit colors need to be shifted to 8-bit)
+            const pal_offset = @as(usize, final_idx) * 3;
+            if (pal_offset + 2 < palette_data.len) {
+                rgba_buf[dst_idx] = .{
+                    .r = palette_data[pal_offset + 0] << 2,
+                    .g = palette_data[pal_offset + 1] << 2,
+                    .b = palette_data[pal_offset + 2] << 2,
+                    .a = 255,
+                };
+            } else {
+                rgba_buf[dst_idx] = .{ .r = 255, .g = 0, .b = 255, .a = 255 }; // Magenta for debug
+            }
+        }
+    }
+
+    // Create or update OpenGL texture
+    if (pth.glpic == 0 or doalloc != 0) {
+        if (pth.glpic == 0) {
+            gl.glGenTextures(1, &pth.glpic);
+        }
+        gl.glBindTexture(gl.GL_TEXTURE_2D, pth.glpic);
+        gl.glTexImage2D(
+            gl.GL_TEXTURE_2D,
+            0,
+            gl.GL_RGBA,
+            sizx,
+            sizy,
+            0,
+            gl.GL_RGBA,
+            gl.GL_UNSIGNED_BYTE,
+            @ptrCast(rgba_buf.ptr),
+        );
+    } else {
+        gl.glBindTexture(gl.GL_TEXTURE_2D, pth.glpic);
+        gl.glTexSubImage2D(
+            gl.GL_TEXTURE_2D,
+            0,
+            0,
+            0,
+            sizx,
+            sizy,
+            gl.GL_RGBA,
+            gl.GL_UNSIGNED_BYTE,
+            @ptrCast(rgba_buf.ptr),
+        );
+    }
+
+    setupTexture(dameth, 1);
+
+    // Store texture info
+    pth.siz = .{ .x = sizx, .y = sizy };
+    // Scale is ratio of actual tile size to texture size (for correct UV mapping)
+    pth.scale = .{
+        .x = @as(f32, @floatFromInt(tsizx_i32)) / @as(f32, @floatFromInt(sizx)),
+        .y = @as(f32, @floatFromInt(tsizy_i32)) / @as(f32, @floatFromInt(sizy)),
+    };
+    pth.picnum = @intCast(picnum);
+    pth.palnum = @intCast(if (pal >= 0 and pal < 256) pal else 0);
+    pth.shade = @intCast(std.math.clamp(shade, -128, 127));
+
+    // Set flags based on whether texture has alpha
+    pth.flags &= ~polymost_types.PthFlags.HASALPHA;
+    // Check if any pixel is transparent
+    for (rgba_buf) |col| {
+        if (col.a < 255) {
+            pth.flags |= polymost_types.PthFlags.HASALPHA;
+            break;
+        }
+    }
+}
+
+/// Create a placeholder texture for missing/invalid tiles
+fn createPlaceholderTexture(pth: *PthType, dameth: i32) void {
     if (pth.glpic == 0) {
         gl.glGenTextures(1, &pth.glpic);
     }
 
     gl.glBindTexture(gl.GL_TEXTURE_2D, pth.glpic);
 
-    // Create a placeholder 64x64 checkerboard texture
-    var placeholder: [64 * 64]ColType = undefined;
-    for (0..64) |y| {
-        for (0..64) |x| {
-            const isWhite = ((x / 8) + (y / 8)) % 2 == 0;
-            const gray: u8 = if (isWhite) 200 else 100;
-            placeholder[y * 64 + x] = .{ .r = gray, .g = gray, .b = gray, .a = 255 };
+    // Create a 16x16 checkerboard placeholder
+    var placeholder: [16 * 16]ColType = undefined;
+    for (0..16) |y| {
+        for (0..16) |x| {
+            const isWhite = ((x / 4) + (y / 4)) % 2 == 0;
+            // Magenta/dark magenta checkerboard for visibility
+            if (isWhite) {
+                placeholder[y * 16 + x] = .{ .r = 255, .g = 0, .b = 255, .a = 255 };
+            } else {
+                placeholder[y * 16 + x] = .{ .r = 128, .g = 0, .b = 128, .a = 255 };
+            }
         }
     }
 
@@ -342,17 +503,17 @@ pub fn gloadtile_art(
         gl.GL_TEXTURE_2D,
         0,
         gl.GL_RGBA,
-        64,
-        64,
+        16,
+        16,
         0,
         gl.GL_RGBA,
         gl.GL_UNSIGNED_BYTE,
         @ptrCast(&placeholder),
     );
 
-    setupTexture(dameth, 1);
+    setupTexture(dameth, 0);
 
-    pth.siz = .{ .x = 64, .y = 64 };
+    pth.siz = .{ .x = 16, .y = 16 };
     pth.scale = .{ .x = 1.0, .y = 1.0 };
 }
 
@@ -375,6 +536,74 @@ pub fn gloadtile_hi(
     // This would load replacement textures (PNG, etc.)
     // For now, return error (no hires replacement found)
     return -1;
+}
+
+// =============================================================================
+// Texture Acquisition (gltex)
+// =============================================================================
+
+/// Texture cache storage (preallocated pool)
+var pth_pool: [4096]PthType = undefined;
+var pth_pool_used: usize = 0;
+
+/// Get or load a texture for rendering
+/// This is the main entry point for acquiring a texture before drawing.
+pub fn gltex(picnum: i32, palnum: i32, dameth: i32) ?*PthType {
+    // Check bounds
+    if (picnum < 0 or picnum >= constants.MAXTILES) return null;
+
+    // Check if already cached
+    if (findTexture(@intCast(picnum), @intCast(if (palnum >= 0 and palnum < 256) palnum else 0), dameth)) |pth| {
+        // Check if texture needs reload (marked invalid)
+        if (pth.glpic != 0) {
+            return pth;
+        }
+    }
+
+    // Allocate new cache entry
+    if (pth_pool_used >= pth_pool.len) {
+        // Cache full, can't allocate
+        return null;
+    }
+
+    const pth = &pth_pool[pth_pool_used];
+    pth_pool_used += 1;
+
+    // Initialize
+    pth.* = PthType{};
+    pth.picnum = @intCast(picnum);
+    pth.palnum = @intCast(if (palnum >= 0 and palnum < 256) palnum else 0);
+
+    // Set clamped flag based on dameth
+    if ((dameth & Dameth.CLAMPED) != 0) {
+        pth.flags |= polymost_types.PthFlags.CLAMPED;
+    }
+
+    // Load the tile
+    const shade: i32 = pm_globals.globalshade;
+    gloadtile_art(picnum, palnum, shade, dameth, pth, 1);
+
+    // Add to cache
+    addTexture(pth);
+
+    return pth;
+}
+
+/// Reset the texture pool (for testing or reload)
+pub fn resetTexturePool() void {
+    // Delete all GL textures
+    for (pth_pool[0..pth_pool_used]) |*pth| {
+        if (pth.glpic != 0) {
+            gl.glDeleteTextures(1, &pth.glpic);
+            pth.glpic = 0;
+        }
+    }
+    pth_pool_used = 0;
+
+    // Clear cache hash table
+    for (&texcache) |*bucket| {
+        bucket.* = null;
+    }
 }
 
 // =============================================================================

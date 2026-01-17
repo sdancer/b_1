@@ -3,6 +3,11 @@
 //!
 //! This is the primary hardware-accelerated renderer for the BUILD engine.
 //! It uses OpenGL for rendering walls, floors, ceilings, and sprites.
+//!
+//! Coordinate Systems:
+//! - BUILD: X=east, Y=north, Z=height (negative=higher)
+//! - OpenGL: X=right, Y=up, Z=out of screen
+//! - Conversion: gl_x=build_x, gl_y=-build_z, gl_z=build_y
 
 const std = @import("std");
 const types = @import("../types.zig");
@@ -11,6 +16,26 @@ const globals = @import("../globals.zig");
 const enums = @import("../enums.zig");
 const gl_state = @import("../gl/state.zig");
 const gl = @import("../gl/bindings.zig");
+
+const pm_globals = @import("globals.zig");
+const texcoord = @import("texcoord.zig");
+const texture = @import("texture.zig");
+const draw = @import("draw.zig");
+const polymost_types = @import("types.zig");
+const art = @import("../fs/art.zig");
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Scale factor for BUILD units to GL units
+const BUILD_TO_GL_SCALE: f32 = 1.0 / 16.0;
+
+/// Z scale factor (BUILD Z is 256 units per BUILD unit height)
+const Z_SCALE: f32 = BUILD_TO_GL_SCALE / 16.0;
+
+/// Maximum sectors to render (for BFS traversal)
+const MAX_VISIBLE_SECTORS: usize = 256;
 
 // =============================================================================
 // Polymost State
@@ -29,56 +54,17 @@ pub var globalfloorpal: i32 = 0;
 
 /// Visibility/fog parameters
 pub var gvisibility: f32 = 0.0;
-pub var gvisibility2: f32 = 0.0;
-pub var gtaession: f32 = 0.0;
-
-/// Texture coordinates for current operation
-pub var gux: f32 = 0.0;
-pub var guy: f32 = 0.0;
-pub var guo: f32 = 0.0;
-pub var gvx: f32 = 0.0;
-pub var gvy: f32 = 0.0;
-pub var gvo: f32 = 0.0;
 
 /// Current transformation state
 pub var ghalfx: f32 = 0.0;
 pub var ghalfy: f32 = 0.0;
-pub var ghoriz: f32 = 0.0;
-pub var ghoriz2: f32 = 0.0;
-pub var ghorizycenter: f32 = 0.0;
-pub var gvrcorrection: f32 = 1.0;
-pub var gshang: f32 = 0.0;
-pub var gchang: f32 = 1.0;
-pub var gshang2: f32 = 0.0;
-pub var gchang2: f32 = 1.0;
-
-/// View parameters
-pub var gviewxrange: f32 = 0.0;
-pub var gyxscale: f32 = 0.0;
-pub var gxyaspect: f32 = 0.0;
 
 /// Cosine/sine of view angle
 pub var gcosang: f32 = 0.0;
 pub var gsinang: f32 = 0.0;
-pub var gcosang2: f32 = 0.0;
-pub var gsinang2: f32 = 0.0;
 
-/// Global position in floating point
-pub var globalposx: f64 = 0.0;
-pub var globalposy: f64 = 0.0;
-pub var globalposz: f64 = 0.0;
-
-/// Global render flags
-pub var globalorientation: i32 = 0;
-
-/// Drawing clipping arrays
-const SCISDIST: f32 = 1.0;
-const MAXYS_BUFFER = 2048;
-var dxb1: [MAXYS_BUFFER]f32 = undefined;
-var dxb2: [MAXYS_BUFFER]f32 = undefined;
-
-/// Most array for depth processing
-var domost_rejectcount: i32 = 0;
+/// Sectors already drawn (to avoid redrawing)
+var drawn_sectors: [constants.MAXSECTORS]bool = [_]bool{false} ** constants.MAXSECTORS;
 
 // =============================================================================
 // Initialization
@@ -91,8 +77,6 @@ pub fn polymost_init() i32 {
     // Initialize default state
     ghalfx = @as(f32, @floatFromInt(globals.xdim)) / 2.0;
     ghalfy = @as(f32, @floatFromInt(globals.ydim)) / 2.0;
-    ghoriz = ghalfy;
-    ghorizycenter = ghoriz;
 
     // Initialize GL state
     polymost_glinit();
@@ -103,20 +87,25 @@ pub fn polymost_init() i32 {
 
 /// Initialize GL-specific polymost state
 pub fn polymost_glinit() void {
-    // Set up default GL state for polymost rendering
+    // Enable texturing
     gl.glEnable(gl.GL_TEXTURE_2D);
+
+    // Enable depth testing
     gl.glEnable(gl.GL_DEPTH_TEST);
     gl.glDepthFunc(gl.GL_LEQUAL);
 
+    // Enable backface culling
+    gl.glEnable(gl.GL_CULL_FACE);
+    gl.glCullFace(gl.GL_BACK);
+    gl.glFrontFace(gl.GL_CCW);
+
+    // Enable blending for transparency
     gl.glEnable(gl.GL_BLEND);
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
 
-    // Set up texture environment
-    gl.glTexEnvf(gl.GL_TEXTURE_ENV, gl.GL_TEXTURE_ENV_MODE, @floatFromInt(gl.GL_MODULATE));
-
-    // Enable alpha testing for transparent textures
+    // Enable alpha testing for masked textures
     gl.glEnable(gl.GL_ALPHA_TEST);
-    gl.glAlphaFunc(gl.GL_GREATER, 0.32);
+    gl.glAlphaFunc(gl.GL_GREATER, 0.01);
 
     // Initialize matrices
     gl.glMatrixMode(gl.GL_PROJECTION);
@@ -124,6 +113,9 @@ pub fn polymost_glinit() void {
 
     gl.glMatrixMode(gl.GL_MODELVIEW);
     gl.glLoadIdentity();
+
+    // Initialize polymost globals
+    pm_globals.initFromEngine();
 }
 
 /// Reset polymost GL state
@@ -142,8 +134,10 @@ pub fn polymost_drawrooms() void {
         _ = polymost_init();
     }
 
-    // Set up view transformation
-    setupViewTransform();
+    // Sync render state from engine globals
+    pm_globals.initFromEngine();
+    pm_globals.updateAngleState();
+    pm_globals.syncRenderParams();
 
     // Clear depth buffer
     gl.glClear(gl.GL_DEPTH_BUFFER_BIT);
@@ -154,232 +148,484 @@ pub fn polymost_drawrooms() void {
     // Set up modelview matrix for the view
     setupModelView();
 
-    // Render the scene
-    // This would process sectors and walls via polymost_drawalls
-    renderScene();
+    // Reset drawn sectors
+    @memset(&drawn_sectors, false);
+
+    // Enable texturing if configured
+    if (use_textures) {
+        gl.glEnable(gl.GL_TEXTURE_2D);
+    } else {
+        gl.glDisable(gl.GL_TEXTURE_2D);
+    }
+
+    // Render visible sectors using BFS from current sector
+    renderVisibleSectors();
 }
 
-/// Set up the view transformation parameters
-fn setupViewTransform() void {
-    const xdim = @as(f32, @floatFromInt(globals.xdim));
-    const ydim = @as(f32, @floatFromInt(globals.ydim));
-
-    ghalfx = xdim / 2.0;
-    ghalfy = ydim / 2.0;
-
-    // Calculate view range
-    gviewxrange = @as(f32, @floatFromInt(globals.viewingrange)) / 65536.0;
-
-    // Calculate aspect ratio
-    gxyaspect = @as(f32, @floatFromInt(globals.yxaspect)) / 65536.0;
-    gyxscale = xdim * gxyaspect / ydim;
-
-    // Get view angle components
-    const ang = globals.globalang;
-    const angf = @as(f32, @floatFromInt(ang)) * std.math.pi * 2.0 / 2048.0;
-    gcosang = @cos(angf);
-    gsinang = @sin(angf);
-    gcosang2 = gcosang;
-    gsinang2 = gsinang;
-
-    // Get horizon
-    ghoriz = ghalfy + @as(f32, @floatFromInt(types.fix16ToInt(globals.globalhoriz))) * gxyaspect;
-    ghorizycenter = ghalfy;
-}
-
-/// Set up the projection matrix
+/// Set up the projection matrix (perspective)
 fn setupProjection() void {
     gl.glMatrixMode(gl.GL_PROJECTION);
     gl.glLoadIdentity();
 
-    const xdim = @as(f32, @floatFromInt(globals.xdim));
-    const ydim = @as(f32, @floatFromInt(globals.ydim));
+    const xdim: f32 = @floatFromInt(globals.xdim);
+    const ydim: f32 = @floatFromInt(globals.ydim);
 
-    // Calculate field of view
+    // Field of view (90 degrees)
     const fov = 90.0 * std.math.pi / 180.0;
     const aspect = xdim / ydim;
-    const znear: f32 = 1.0;
-    const zfar: f32 = 1000000.0;
+    const znear: f32 = 4.0;
+    const zfar: f32 = 100000.0;
 
     const f = 1.0 / @tan(fov / 2.0);
 
-    // Build perspective matrix manually (OpenGL 1.x style)
-    var proj: [16]f32 = .{
-        f / aspect, 0, 0, 0,
-        0, f, 0, 0,
-        0, 0, (zfar + znear) / (znear - zfar), -1,
-        0, 0, (2 * zfar * znear) / (znear - zfar), 0,
+    // Build perspective matrix (column-major for OpenGL)
+    const proj: [16]f32 = .{
+        f / aspect, 0.0,  0.0,                                   0.0,
+        0.0,        f,    0.0,                                   0.0,
+        0.0,        0.0,  (zfar + znear) / (znear - zfar),      -1.0,
+        0.0,        0.0,  (2.0 * zfar * znear) / (znear - zfar), 0.0,
     };
 
     gl.glLoadMatrixf(&proj);
 }
 
-/// Set up the modelview matrix
+/// Set up the modelview matrix (camera transformation)
 fn setupModelView() void {
     gl.glMatrixMode(gl.GL_MODELVIEW);
     gl.glLoadIdentity();
 
-    // Apply view rotation
-    gl.glRotatef(-@as(f32, @floatFromInt(types.fix16ToInt(globals.globalhoriz))) * 0.087890625, 1.0, 0.0, 0.0);
-    gl.glRotatef(-@as(f32, @floatFromInt(globals.globalang)) * 0.087890625, 0.0, 1.0, 0.0);
+    // Get camera parameters
+    const horiz: f32 = @floatFromInt(types.fix16ToInt(globals.globalhoriz));
+    const ang: f32 = @floatFromInt(globals.globalang);
 
-    // Apply view translation (convert from BUILD units)
-    const scale: f32 = 1.0 / 16.0;
-    gl.glTranslatef(
-        -@as(f32, @floatFromInt(globals.globalposx)) * scale,
-        -@as(f32, @floatFromInt(globals.globalposz)) * scale / 16.0,
-        -@as(f32, @floatFromInt(globals.globalposy)) * scale,
-    );
+    // Look up/down: horiz 100 = level, <100 = look down, >100 = look up
+    // Convert to pitch angle (horiz-100 maps to degrees)
+    const pitch = (horiz - 100.0) * 0.35;
+
+    // Yaw angle: BUILD uses 2048 units = 360 degrees
+    // 0 = east, 512 = north, 1024 = west, 1536 = south
+    const yaw = ang * (360.0 / 2048.0);
+
+    // Apply rotations (order matters!)
+    // First pitch (look up/down around X axis)
+    gl.glRotatef(-pitch, 1.0, 0.0, 0.0);
+
+    // Then yaw (rotate around Y axis)
+    // Subtract 90 because BUILD 0 is east, but we want to look down +Z
+    gl.glRotatef(-(yaw - 90.0), 0.0, 1.0, 0.0);
+
+    // Camera position
+    // BUILD: X=east, Y=north, Z=height (negative=higher)
+    // GL: X=right, Y=up, Z=out
+    // Mapping: gl_x = build_x, gl_y = -build_z, gl_z = build_y
+    const cam_x: f32 = @as(f32, @floatFromInt(globals.globalposx)) * BUILD_TO_GL_SCALE;
+    const cam_y: f32 = @as(f32, @floatFromInt(-globals.globalposz)) * Z_SCALE;
+    const cam_z: f32 = @as(f32, @floatFromInt(globals.globalposy)) * BUILD_TO_GL_SCALE;
+
+    gl.glTranslatef(-cam_x, -cam_y, -cam_z);
 }
 
-/// Render the scene (sectors and walls)
-fn renderScene() void {
-    // Process all visible sectors
-    const numsectors = globals.numsectors;
+/// Render all visible sectors using BFS from current sector
+fn renderVisibleSectors() void {
+    const numsectors: i32 = globals.numsectors;
     if (numsectors <= 0) return;
 
-    // Start from the current sector
-    var sectnum = globals.globalcursectnum;
-    if (sectnum < 0 or sectnum >= numsectors) {
-        sectnum = 0;
+    var start_sect = globals.globalcursectnum;
+    if (start_sect < 0 or start_sect >= numsectors) {
+        start_sect = 0;
     }
 
-    // Render the starting sector
-    drawSector(@intCast(sectnum));
+    // BFS queue for sector traversal
+    var queue: [MAX_VISIBLE_SECTORS]i16 = undefined;
+    var queue_head: usize = 0;
+    var queue_tail: usize = 0;
+
+    // Start with current sector
+    queue[queue_tail] = start_sect;
+    queue_tail += 1;
+    drawn_sectors[@intCast(start_sect)] = true;
+
+    // Process queue
+    while (queue_head < queue_tail) {
+        const sectnum = queue[queue_head];
+        queue_head += 1;
+
+        // Draw this sector
+        drawSectorGeometry(@intCast(sectnum));
+
+        // Add neighboring sectors through portals
+        const sec = &globals.sector[@intCast(sectnum)];
+        const startwall: usize = @intCast(sec.wallptr);
+        const wallcount: usize = @intCast(sec.wallnum);
+
+        for (startwall..startwall + wallcount) |i| {
+            const wall = &globals.wall[i];
+            if (wall.nextsector >= 0 and wall.nextsector < numsectors) {
+                const nextsect: usize = @intCast(wall.nextsector);
+                if (!drawn_sectors[nextsect] and queue_tail < MAX_VISIBLE_SECTORS) {
+                    queue[queue_tail] = wall.nextsector;
+                    queue_tail += 1;
+                    drawn_sectors[nextsect] = true;
+                }
+            }
+        }
+    }
 }
 
-/// Draw a single sector
-fn drawSector(sectnum: usize) void {
+// =============================================================================
+// Sector Rendering
+// =============================================================================
+
+/// Draw all geometry for a sector (floor, ceiling, walls)
+fn drawSectorGeometry(sectnum: usize) void {
     if (sectnum >= @as(usize, @intCast(globals.numsectors))) return;
 
     const sec = &globals.sector[sectnum];
 
-    // Draw floor and ceiling
-    drawFloor(sectnum, sec);
-    drawCeiling(sectnum, sec);
+    // Draw floor
+    drawFlat(sectnum, sec, false);
 
-    // Draw all walls in the sector
-    const wallptr = @as(usize, @intCast(sec.wallptr));
-    const wallnum = @as(usize, @intCast(sec.wallnum));
+    // Draw ceiling
+    drawFlat(sectnum, sec, true);
 
-    for (wallptr..wallptr + wallnum) |i| {
-        drawWall(i);
+    // Draw walls
+    const startwall: usize = @intCast(sec.wallptr);
+    const wallcount: usize = @intCast(sec.wallnum);
+
+    for (startwall..startwall + wallcount) |i| {
+        drawWallWithSector(i, sectnum);
     }
 }
 
-/// Draw sector floor
-fn drawFloor(sectnum: usize, sec: *const types.SectorType) void {
-    _ = sectnum;
+/// Whether to use textured rendering (vs color-only)
+pub var use_textures: bool = true;
 
-    const floorz = @as(f32, @floatFromInt(sec.floorz)) / 16.0;
+/// Draw floor or ceiling flat
+fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void {
+    const startwall: usize = @intCast(sec.wallptr);
+    const wallcount: usize = @intCast(sec.wallnum);
 
-    // Calculate floor shade
-    const shade = @as(f32, @floatFromInt(sec.floorshade)) / 64.0;
-    const shadeFactor = std.math.clamp(1.0 - shade, 0.0, 1.0);
+    if (wallcount < 3) return;
 
-    gl.glColor3f(shadeFactor * 0.5, shadeFactor * 0.5, shadeFactor * 0.5);
+    // Get Z height
+    const z: f32 = if (is_ceiling)
+        @as(f32, @floatFromInt(-sec.ceilingz)) * Z_SCALE
+    else
+        @as(f32, @floatFromInt(-sec.floorz)) * Z_SCALE;
 
-    // Draw floor polygon (simplified - full implementation would use actual geometry)
-    _ = floorz;
-}
+    // Get shade
+    const shade_val: i8 = if (is_ceiling) sec.ceilingshade else sec.floorshade;
+    const shade: f32 = @as(f32, @floatFromInt(shade_val)) / 64.0;
+    const brightness = std.math.clamp(1.0 - shade, 0.1, 1.0);
 
-/// Draw sector ceiling
-fn drawCeiling(sectnum: usize, sec: *const types.SectorType) void {
-    _ = sectnum;
+    // Collect vertices
+    var verts_x: [256]f32 = undefined;
+    var verts_z: [256]f32 = undefined;
+    var vertex_count: usize = 0;
 
-    const ceilingz = @as(f32, @floatFromInt(sec.ceilingz)) / 16.0;
+    for (startwall..startwall + wallcount) |i| {
+        if (vertex_count >= 256) break;
+        const wall = &globals.wall[i];
+        verts_x[vertex_count] = @as(f32, @floatFromInt(wall.x)) * BUILD_TO_GL_SCALE;
+        verts_z[vertex_count] = @as(f32, @floatFromInt(wall.y)) * BUILD_TO_GL_SCALE;
+        vertex_count += 1;
+    }
 
-    // Calculate ceiling shade
-    const shade = @as(f32, @floatFromInt(sec.ceilingshade)) / 64.0;
-    const shadeFactor = std.math.clamp(1.0 - shade, 0.0, 1.0);
+    if (vertex_count < 3) return;
 
-    gl.glColor3f(shadeFactor * 0.4, shadeFactor * 0.4, shadeFactor * 0.6);
+    // Calculate centroid for fan triangulation
+    var cx: f32 = 0;
+    var cz: f32 = 0;
+    for (0..vertex_count) |i| {
+        cx += verts_x[i];
+        cz += verts_z[i];
+    }
+    cx /= @floatFromInt(vertex_count);
+    cz /= @floatFromInt(vertex_count);
 
-    // Draw ceiling polygon (simplified)
-    _ = ceilingz;
-}
+    // Get texture info if using textures
+    const picnum: i32 = if (is_ceiling) sec.ceilingpicnum else sec.floorpicnum;
+    const pal: u8 = if (is_ceiling) sec.ceilingpal else sec.floorpal;
 
-/// Draw a single wall
-fn drawWall(wallnum: usize) void {
-    if (wallnum >= @as(usize, @intCast(globals.numwalls))) return;
+    if (use_textures and picnum >= 0 and picnum < constants.MAXTILES) {
+        // Set up global render params for texture loading
+        pm_globals.globalpicnum = picnum;
+        pm_globals.globalpal = pal;
+        pm_globals.globalshade = shade_val;
 
-    const wal = &globals.wall[wallnum];
-    const wal2 = &globals.wall[@intCast(wal.point2)];
+        // Get/load texture
+        const pth = texture.gltex(picnum, pal, 0);
 
-    // Wall endpoints in world space
-    const x1 = @as(f32, @floatFromInt(wal.x));
-    const y1 = @as(f32, @floatFromInt(wal.y));
-    const x2 = @as(f32, @floatFromInt(wal2.x));
-    const y2 = @as(f32, @floatFromInt(wal2.y));
-
-    // Get the sectors on each side of the wall
-    const sectnum = wal.nextsector;
-
-    // Calculate wall shade
-    const shade = @as(f32, @floatFromInt(wal.shade)) / 64.0;
-    const shadeFactor = std.math.clamp(1.0 - shade, 0.0, 1.0);
-
-    gl.glColor3f(shadeFactor, shadeFactor, shadeFactor);
-
-    // Draw wall (simplified - full implementation would handle all wall types)
-    if (sectnum < 0) {
-        // Solid wall (one-sided)
-        drawSolidWall(x1, y1, x2, y2, wal);
+        if (pth) |p| {
+            gl.glEnable(gl.GL_TEXTURE_2D);
+            gl.glBindTexture(gl.GL_TEXTURE_2D, p.glpic);
+            gl.glColor4f(brightness, brightness, brightness, 1.0);
+        } else {
+            gl.glDisable(gl.GL_TEXTURE_2D);
+            if (is_ceiling) {
+                gl.glColor3f(brightness * 0.3, brightness * 0.3, brightness * 0.5);
+            } else {
+                gl.glColor3f(brightness * 0.5, brightness * 0.4, brightness * 0.3);
+            }
+        }
     } else {
-        // Portal wall (two-sided)
-        drawPortalWall(x1, y1, x2, y2, wal, @intCast(sectnum));
+        // Color-only mode
+        gl.glDisable(gl.GL_TEXTURE_2D);
+        if (is_ceiling) {
+            gl.glColor3f(brightness * 0.3, brightness * 0.3, brightness * 0.5);
+        } else {
+            gl.glColor3f(brightness * 0.5, brightness * 0.4, brightness * 0.3);
+        }
     }
-}
 
-/// Draw a solid (one-sided) wall
-fn drawSolidWall(x1: f32, y1: f32, x2: f32, y2: f32, wal: *const types.WallType) void {
-    _ = wal;
+    // Draw as triangle fan from centroid
+    gl.glBegin(gl.GL_TRIANGLE_FAN);
 
-    // This is a simplified version - real implementation would use proper Z coordinates
-    const z1: f32 = 0.0;
-    const z2: f32 = 256.0;
-    const scale: f32 = 1.0 / 16.0;
+    // Texture scale factor for BUILD units
+    const tex_scale: f32 = 1.0 / 64.0;
 
-    gl.glBegin(gl.GL_QUADS);
+    // Apply floor/ceiling panning
+    const xpan: f32 = @as(f32, @floatFromInt(if (is_ceiling) sec.ceilingxpanning else sec.floorxpanning)) / 256.0;
+    const ypan: f32 = @as(f32, @floatFromInt(if (is_ceiling) sec.ceilingypanning else sec.floorypanning)) / 256.0;
+    _ = sectnum;
 
-    gl.glTexCoord2f(0.0, 0.0);
-    gl.glVertex3f(x1 * scale, z1 * scale, y1 * scale);
+    // Center vertex
+    gl.glTexCoord2f(cx * tex_scale + xpan, cz * tex_scale + ypan);
+    gl.glVertex3f(cx, z, cz);
 
-    gl.glTexCoord2f(1.0, 0.0);
-    gl.glVertex3f(x2 * scale, z1 * scale, y2 * scale);
-
-    gl.glTexCoord2f(1.0, 1.0);
-    gl.glVertex3f(x2 * scale, z2 * scale, y2 * scale);
-
-    gl.glTexCoord2f(0.0, 1.0);
-    gl.glVertex3f(x1 * scale, z2 * scale, y1 * scale);
+    // Perimeter vertices - wind correctly for ceiling vs floor
+    if (is_ceiling) {
+        // Ceiling: reverse winding
+        var i: usize = vertex_count;
+        while (i > 0) {
+            i -= 1;
+            gl.glTexCoord2f(verts_x[i] * tex_scale + xpan, verts_z[i] * tex_scale + ypan);
+            gl.glVertex3f(verts_x[i], z, verts_z[i]);
+        }
+        // Close the fan
+        gl.glTexCoord2f(verts_x[vertex_count - 1] * tex_scale + xpan, verts_z[vertex_count - 1] * tex_scale + ypan);
+        gl.glVertex3f(verts_x[vertex_count - 1], z, verts_z[vertex_count - 1]);
+    } else {
+        // Floor: normal winding
+        for (0..vertex_count) |i| {
+            gl.glTexCoord2f(verts_x[i] * tex_scale + xpan, verts_z[i] * tex_scale + ypan);
+            gl.glVertex3f(verts_x[i], z, verts_z[i]);
+        }
+        // Close the fan
+        gl.glTexCoord2f(verts_x[0] * tex_scale + xpan, verts_z[0] * tex_scale + ypan);
+        gl.glVertex3f(verts_x[0], z, verts_z[0]);
+    }
 
     gl.glEnd();
 }
 
-/// Draw a portal (two-sided) wall
-fn drawPortalWall(x1: f32, y1: f32, x2: f32, y2: f32, wal: *const types.WallType, nextsector: usize) void {
-    _ = wal;
-    _ = nextsector;
+/// Draw a wall with proper sector heights
+fn drawWallWithSector(wallnum: usize, sectnum: usize) void {
+    if (wallnum >= @as(usize, @intCast(globals.numwalls))) return;
 
-    // Portal walls have upper and lower portions
-    // This is simplified - full implementation would handle all cases
-    const scale: f32 = 1.0 / 16.0;
+    const wall = &globals.wall[wallnum];
+    const wall2 = &globals.wall[@intCast(wall.point2)];
+    const sec = &globals.sector[sectnum];
 
-    // Draw upper wall portion
+    // Wall endpoints in GL coordinates
+    const x1: f32 = @as(f32, @floatFromInt(wall.x)) * BUILD_TO_GL_SCALE;
+    const z1: f32 = @as(f32, @floatFromInt(wall.y)) * BUILD_TO_GL_SCALE;
+    const x2: f32 = @as(f32, @floatFromInt(wall2.x)) * BUILD_TO_GL_SCALE;
+    const z2: f32 = @as(f32, @floatFromInt(wall2.y)) * BUILD_TO_GL_SCALE;
+
+    // Current sector floor and ceiling heights
+    const floor_y: f32 = @as(f32, @floatFromInt(-sec.floorz)) * Z_SCALE;
+    const ceil_y: f32 = @as(f32, @floatFromInt(-sec.ceilingz)) * Z_SCALE;
+
+    // Calculate wall shade
+    const shade: f32 = @as(f32, @floatFromInt(wall.shade)) / 64.0;
+    const brightness = std.math.clamp(1.0 - shade, 0.1, 1.0);
+
+    // Calculate wall length for texture coordinates
+    const dx = @as(f32, @floatFromInt(wall2.x - wall.x));
+    const dy = @as(f32, @floatFromInt(wall2.y - wall.y));
+    const wall_len = @sqrt(dx * dx + dy * dy);
+
+    // Texture repeat/panning
+    const xrepeat: f32 = @floatFromInt(wall.xrepeat);
+    const yrepeat: f32 = @floatFromInt(wall.yrepeat);
+    const xpan: f32 = @as(f32, @floatFromInt(wall.xpanning)) / 256.0;
+    const ypan: f32 = @as(f32, @floatFromInt(wall.ypanning)) / 256.0;
+
+    if (wall.nextsector < 0) {
+        // Solid wall (one-sided) - draw full height
+        const picnum = wall.picnum;
+        drawTexturedWallQuad(
+            x1,
+            z1,
+            x2,
+            z2,
+            floor_y,
+            ceil_y,
+            picnum,
+            wall.pal,
+            wall.shade,
+            brightness,
+            wall_len,
+            xrepeat,
+            yrepeat,
+            xpan,
+            ypan,
+        );
+    } else {
+        // Portal wall (two-sided) - draw upper and lower portions
+        const nextsect: usize = @intCast(wall.nextsector);
+        const next_sec = &globals.sector[nextsect];
+        const next_floor_y: f32 = @as(f32, @floatFromInt(-next_sec.floorz)) * Z_SCALE;
+        const next_ceil_y: f32 = @as(f32, @floatFromInt(-next_sec.ceilingz)) * Z_SCALE;
+
+        // Upper wall (above neighbor ceiling, if any)
+        if (ceil_y > next_ceil_y) {
+            const picnum = wall.picnum; // Could use overpicnum in some cases
+            drawTexturedWallQuad(
+                x1,
+                z1,
+                x2,
+                z2,
+                next_ceil_y,
+                ceil_y,
+                picnum,
+                wall.pal,
+                wall.shade,
+                brightness * 0.95,
+                wall_len,
+                xrepeat,
+                yrepeat,
+                xpan,
+                ypan,
+            );
+        }
+
+        // Lower wall (below neighbor floor, if any)
+        if (next_floor_y > floor_y) {
+            const picnum = wall.picnum;
+            drawTexturedWallQuad(
+                x1,
+                z1,
+                x2,
+                z2,
+                floor_y,
+                next_floor_y,
+                picnum,
+                wall.pal,
+                wall.shade,
+                brightness * 0.9,
+                wall_len,
+                xrepeat,
+                yrepeat,
+                xpan,
+                ypan,
+            );
+        }
+
+        // Draw masked/glass wall if applicable (overpicnum)
+        if (wall.overpicnum > 0 and (wall.cstat & enums.CstatWall.MASKED) != 0) {
+            const portal_bottom = @max(floor_y, next_floor_y);
+            const portal_top = @min(ceil_y, next_ceil_y);
+            if (portal_top > portal_bottom) {
+                gl.glEnable(gl.GL_BLEND);
+                drawTexturedWallQuad(
+                    x1,
+                    z1,
+                    x2,
+                    z2,
+                    portal_bottom,
+                    portal_top,
+                    wall.overpicnum,
+                    wall.pal,
+                    wall.shade,
+                    brightness,
+                    wall_len,
+                    xrepeat,
+                    yrepeat,
+                    xpan,
+                    ypan,
+                );
+            }
+        }
+    }
+}
+
+/// Draw a textured wall quad
+fn drawTexturedWallQuad(
+    x1: f32,
+    z1: f32,
+    x2: f32,
+    z2: f32,
+    y_bottom: f32,
+    y_top: f32,
+    picnum: i16,
+    pal: u8,
+    shade: i8,
+    brightness: f32,
+    wall_len: f32,
+    xrepeat: f32,
+    yrepeat: f32,
+    xpan: f32,
+    ypan: f32,
+) void {
+    if (use_textures and picnum >= 0 and picnum < constants.MAXTILES) {
+        // Set up global render params
+        pm_globals.globalpicnum = picnum;
+        pm_globals.globalpal = pal;
+        pm_globals.globalshade = shade;
+
+        // Get/load texture
+        const pth = texture.gltex(picnum, pal, 0);
+
+        if (pth) |p| {
+            gl.glEnable(gl.GL_TEXTURE_2D);
+            gl.glBindTexture(gl.GL_TEXTURE_2D, p.glpic);
+            gl.glColor4f(brightness, brightness, brightness, 1.0);
+
+            // Calculate texture coordinates
+            // U: horizontal along wall, V: vertical
+            const u_scale = xrepeat * 8.0 / wall_len;
+            const v_scale = yrepeat / 256.0;
+
+            const tex_u0 = xpan;
+            const tex_u1 = tex_u0 + wall_len * u_scale / 64.0;
+            const height = y_top - y_bottom;
+            const tex_v0 = ypan;
+            const tex_v1 = tex_v0 + height * v_scale;
+
+            gl.glBegin(gl.GL_QUADS);
+            gl.glTexCoord2f(tex_u0 * p.scale.x, tex_v1 * p.scale.y);
+            gl.glVertex3f(x1, y_bottom, z1);
+            gl.glTexCoord2f(tex_u1 * p.scale.x, tex_v1 * p.scale.y);
+            gl.glVertex3f(x2, y_bottom, z2);
+            gl.glTexCoord2f(tex_u1 * p.scale.x, tex_v0 * p.scale.y);
+            gl.glVertex3f(x2, y_top, z2);
+            gl.glTexCoord2f(tex_u0 * p.scale.x, tex_v0 * p.scale.y);
+            gl.glVertex3f(x1, y_top, z1);
+            gl.glEnd();
+            return;
+        }
+    }
+
+    // Fallback to color-only
+    gl.glDisable(gl.GL_TEXTURE_2D);
+    gl.glColor3f(brightness, brightness, brightness);
+    drawWallQuad(x1, z1, x2, z2, y_bottom, y_top);
+}
+
+/// Draw a single wall quad
+fn drawWallQuad(x1: f32, z1: f32, x2: f32, z2: f32, y_bottom: f32, y_top: f32) void {
     gl.glBegin(gl.GL_QUADS);
 
-    gl.glTexCoord2f(0.0, 0.0);
-    gl.glVertex3f(x1 * scale, 200.0 * scale, y1 * scale);
-
-    gl.glTexCoord2f(1.0, 0.0);
-    gl.glVertex3f(x2 * scale, 200.0 * scale, y2 * scale);
-
-    gl.glTexCoord2f(1.0, 1.0);
-    gl.glVertex3f(x2 * scale, 256.0 * scale, y2 * scale);
-
-    gl.glTexCoord2f(0.0, 1.0);
-    gl.glVertex3f(x1 * scale, 256.0 * scale, y1 * scale);
+    // Bottom-left
+    gl.glVertex3f(x1, y_bottom, z1);
+    // Bottom-right
+    gl.glVertex3f(x2, y_bottom, z2);
+    // Top-right
+    gl.glVertex3f(x2, y_top, z2);
+    // Top-left
+    gl.glVertex3f(x1, y_top, z1);
 
     gl.glEnd();
 }
@@ -397,122 +643,30 @@ pub fn polymost_drawsprite(snum: i32) void {
 
     const spr = tspr.?;
 
-    // Get sprite position
-    const sx = @as(f32, @floatFromInt(spr.x)) / 16.0;
-    const sy = @as(f32, @floatFromInt(spr.z)) / 256.0;
-    const sz = @as(f32, @floatFromInt(spr.y)) / 16.0;
+    // Get sprite position in GL coordinates
+    const sx: f32 = @as(f32, @floatFromInt(spr.x)) * BUILD_TO_GL_SCALE;
+    const sy: f32 = @as(f32, @floatFromInt(-spr.z)) * Z_SCALE;
+    const sz: f32 = @as(f32, @floatFromInt(spr.y)) * BUILD_TO_GL_SCALE;
 
     // Calculate sprite size
-    const xrepeat = @as(f32, @floatFromInt(spr.xrepeat));
-    const yrepeat = @as(f32, @floatFromInt(spr.yrepeat));
-    const sizx = xrepeat * 2.0;
-    const sizy = yrepeat * 2.0;
-
-    // Get sprite type (face, wall, floor)
-    const cstat = spr.cstat;
-    const spriteType = cstat & enums.CstatSprite.ALIGNMENT_MASK;
+    const xrepeat: f32 = @floatFromInt(spr.xrepeat);
+    const yrepeat: f32 = @floatFromInt(spr.yrepeat);
+    const sizx = xrepeat * 0.5;
+    const sizy = yrepeat * 0.5;
 
     // Calculate shade
-    const shade = @as(f32, @floatFromInt(spr.shade)) / 64.0;
-    const shadeFactor = std.math.clamp(1.0 - shade, 0.0, 1.0);
+    const shade: f32 = @as(f32, @floatFromInt(spr.shade)) / 64.0;
+    const brightness = std.math.clamp(1.0 - shade, 0.1, 1.0);
 
-    // Handle translucency
-    var alpha: f32 = 1.0;
-    if ((cstat & enums.CstatSprite.TRANSLUCENT) != 0) {
-        alpha = if ((cstat & enums.CstatSprite.TRANSLUCENT_INVERT) != 0) 0.33 else 0.66;
-    }
+    // Yellow color for sprites
+    gl.glColor3f(brightness, brightness * 0.8, 0.2);
 
-    gl.glColor4f(shadeFactor, shadeFactor, shadeFactor, alpha);
-
-    // Draw based on sprite type
-    if (spriteType == enums.CstatSprite.ALIGNMENT_WALL) {
-        drawWallSprite(sx, sy, sz, sizx, sizy, spr.ang);
-    } else if (spriteType == enums.CstatSprite.ALIGNMENT_FLOOR) {
-        drawFloorSprite(sx, sy, sz, sizx, sizy, spr.ang);
-    } else {
-        // Face sprite (always faces camera)
-        drawFaceSprite(sx, sy, sz, sizx, sizy);
-    }
-}
-
-/// Draw a face sprite (billboard)
-fn drawFaceSprite(x: f32, y: f32, z: f32, sizx: f32, sizy: f32) void {
-    // Get the inverse modelview matrix for billboarding
-    // Simplified - proper implementation would extract camera right/up vectors
-
-    gl.glPushMatrix();
-    gl.glTranslatef(x, y, z);
-
-    // Apply billboarding by zeroing rotation
-    // This is simplified - real implementation would use proper billboard matrix
-
+    // Draw simple quad marker for sprite
     gl.glBegin(gl.GL_QUADS);
-
-    gl.glTexCoord2f(0.0, 0.0);
-    gl.glVertex3f(-sizx / 2.0, 0.0, 0.0);
-
-    gl.glTexCoord2f(1.0, 0.0);
-    gl.glVertex3f(sizx / 2.0, 0.0, 0.0);
-
-    gl.glTexCoord2f(1.0, 1.0);
-    gl.glVertex3f(sizx / 2.0, sizy, 0.0);
-
-    gl.glTexCoord2f(0.0, 1.0);
-    gl.glVertex3f(-sizx / 2.0, sizy, 0.0);
-
-    gl.glEnd();
-
-    gl.glPopMatrix();
-}
-
-/// Draw a wall-aligned sprite
-fn drawWallSprite(x: f32, y: f32, z: f32, sizx: f32, sizy: f32, ang: i16) void {
-    const angf = @as(f32, @floatFromInt(ang)) * std.math.pi * 2.0 / 2048.0;
-    const cos_a = @cos(angf);
-    const sin_a = @sin(angf);
-
-    const hx = sizx / 2.0;
-
-    gl.glBegin(gl.GL_QUADS);
-
-    gl.glTexCoord2f(0.0, 0.0);
-    gl.glVertex3f(x - hx * cos_a, y, z - hx * sin_a);
-
-    gl.glTexCoord2f(1.0, 0.0);
-    gl.glVertex3f(x + hx * cos_a, y, z + hx * sin_a);
-
-    gl.glTexCoord2f(1.0, 1.0);
-    gl.glVertex3f(x + hx * cos_a, y + sizy, z + hx * sin_a);
-
-    gl.glTexCoord2f(0.0, 1.0);
-    gl.glVertex3f(x - hx * cos_a, y + sizy, z - hx * sin_a);
-
-    gl.glEnd();
-}
-
-/// Draw a floor-aligned sprite
-fn drawFloorSprite(x: f32, y: f32, z: f32, sizx: f32, sizy: f32, ang: i16) void {
-    const angf = @as(f32, @floatFromInt(ang)) * std.math.pi * 2.0 / 2048.0;
-    const cos_a = @cos(angf);
-    const sin_a = @sin(angf);
-
-    const hx = sizx / 2.0;
-    const hy = sizy / 2.0;
-
-    gl.glBegin(gl.GL_QUADS);
-
-    gl.glTexCoord2f(0.0, 0.0);
-    gl.glVertex3f(x - hx * cos_a + hy * sin_a, y, z - hx * sin_a - hy * cos_a);
-
-    gl.glTexCoord2f(1.0, 0.0);
-    gl.glVertex3f(x + hx * cos_a + hy * sin_a, y, z + hx * sin_a - hy * cos_a);
-
-    gl.glTexCoord2f(1.0, 1.0);
-    gl.glVertex3f(x + hx * cos_a - hy * sin_a, y, z + hx * sin_a + hy * cos_a);
-
-    gl.glTexCoord2f(0.0, 1.0);
-    gl.glVertex3f(x - hx * cos_a - hy * sin_a, y, z - hx * sin_a + hy * cos_a);
-
+    gl.glVertex3f(sx - sizx, sy, sz - sizx);
+    gl.glVertex3f(sx + sizx, sy, sz - sizx);
+    gl.glVertex3f(sx + sizx, sy + sizy, sz + sizx);
+    gl.glVertex3f(sx - sizx, sy + sizy, sz + sizx);
     gl.glEnd();
 }
 
@@ -524,86 +678,43 @@ fn drawFloorSprite(x: f32, y: f32, z: f32, sizx: f32, sizy: f32, ang: i16) void 
 pub fn polymost_drawmaskwall(damaskwallcnt: i32) void {
     if (damaskwallcnt < 0 or damaskwallcnt >= constants.MAXWALLSB) return;
 
-    // Get the masked wall index from the list
     const wallnum = globals.maskwall[@intCast(damaskwallcnt)];
     if (wallnum < 0 or wallnum >= globals.numwalls) return;
 
-    const wal = &globals.wall[@intCast(wallnum)];
+    // Find the sector for this wall
+    for (0..@as(usize, @intCast(globals.numsectors))) |sectnum| {
+        const sec = &globals.sector[sectnum];
+        const startwall: i16 = sec.wallptr;
+        const endwall = startwall + sec.wallnum;
 
-    // Enable alpha blending for masked walls
-    gl_state.setEnabled(gl_state.GL_BLEND);
-
-    // Check if wall has translucency
-    if ((wal.cstat & enums.CstatWall.TRANSLUCENT) != 0) {
-        if ((wal.cstat & enums.CstatWall.TRANS_FLIP) != 0) {
-            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
-        } else {
-            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
+        if (wallnum >= startwall and wallnum < endwall) {
+            drawWallWithSector(@intCast(wallnum), sectnum);
+            break;
         }
     }
-
-    // Draw the masked wall
-    drawWall(@intCast(wallnum));
 }
-
-// =============================================================================
-// Polygon Filling
-// =============================================================================
 
 /// Fill a polygon (used for floors and ceilings)
 pub fn polymost_fillpolygon(npoints: i32) void {
     if (npoints < 3) return;
-
-    // This would use the rx1/ry1 arrays for polygon vertices
-    // Simplified for now
-
-    gl.glBegin(gl.GL_POLYGON);
-
-    for (0..@as(usize, @intCast(npoints))) |_| {
-        // Would use actual vertex data from rx1/ry1 arrays
-        gl.glVertex3f(0.0, 0.0, 0.0);
-    }
-
-    gl.glEnd();
+    // Polygon filling is handled by drawFlat now
 }
-
-// =============================================================================
-// Domost Algorithm (Core Rendering)
-// =============================================================================
 
 /// Core polygon rendering with depth processing
-/// This is the heart of the polymost renderer
 pub fn polymost_domost(x0: f32, y0: f32, x1: f32, y1: f32) void {
-    // The domost algorithm processes horizontal spans for rendering
-    // It maintains a list of visible spans and clips geometry against them
-
-    if (x0 >= x1) return;
-
-    // Clamp to screen bounds
-    const fx0 = @max(0.0, x0);
-    const fx1 = @min(@as(f32, @floatFromInt(globals.xdim)), x1);
-    const fy0 = @max(0.0, y0);
-    const fy1 = @min(@as(f32, @floatFromInt(globals.ydim)), y1);
-
-    if (fx0 >= fx1) return;
-
-    // Store in domost buffer for later processing
-    _ = fy0;
-    _ = fy1;
-
-    domost_rejectcount += 1;
+    _ = x0;
+    _ = y0;
+    _ = x1;
+    _ = y1;
+    // This is part of the full polymost BSP rendering
+    // For the explorer demo, we use simpler BFS rendering
 }
 
-/// Draw all walls in a bunch (group of connected walls)
+/// Draw all walls in a bunch
 pub fn polymost_drawalls(bunch: i32) void {
-    // Process the bunch of walls
-    // A bunch is a group of walls that should be drawn together
-    // for correct visibility ordering
-
-    if (bunch < 0) return;
-
-    // TODO: Implement bunch processing
-    // This would iterate through walls in the bunch and draw them
+    _ = bunch;
+    // Bunch rendering is part of full polymost
+    // For the explorer demo, we use simpler per-sector rendering
 }
 
 // =============================================================================
@@ -622,7 +733,6 @@ pub fn polymost_spriteHasTranslucency(tspr: *const types.TSpriteType) bool {
 
 /// Check if a sprite is a model or voxel
 pub fn polymost_spriteIsModelOrVoxel(tspr: *const types.TSpriteType) bool {
-    // Would check against voxel and model definitions
     _ = tspr;
     return false;
 }
@@ -644,8 +754,6 @@ pub fn eligible_for_tileshades(picnum: i32, pal: i32) bool {
 // =============================================================================
 // Tests
 // =============================================================================
-
-// Note: polymost_init test is skipped because it requires a GL context
 
 test "shade factor calculation" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), getshadefactor(0, 0), 0.01);
