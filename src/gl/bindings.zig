@@ -157,6 +157,11 @@ pub const GL_ALWAYS: GLenum = 0x0207;
 pub const GL_CW: GLenum = 0x0900;
 pub const GL_CCW: GLenum = 0x0901;
 
+// Face selection
+pub const GL_FRONT: GLenum = 0x0404;
+pub const GL_BACK: GLenum = 0x0405;
+pub const GL_FRONT_AND_BACK: GLenum = 0x0408;
+
 // Client state arrays
 pub const GL_VERTEX_ARRAY: GLenum = 0x8074;
 pub const GL_NORMAL_ARRAY: GLenum = 0x8075;

@@ -424,7 +424,7 @@ pub fn gloadtile_art(
     // Create or update OpenGL texture
     if (pth.glpic == 0 or doalloc != 0) {
         if (pth.glpic == 0) {
-            gl.glGenTextures(1, &pth.glpic);
+            gl.glGenTextures(1, @ptrCast(&pth.glpic));
         }
         gl.glBindTexture(gl.GL_TEXTURE_2D, pth.glpic);
         gl.glTexImage2D(
@@ -480,7 +480,7 @@ pub fn gloadtile_art(
 /// Create a placeholder texture for missing/invalid tiles
 fn createPlaceholderTexture(pth: *PthType, dameth: i32) void {
     if (pth.glpic == 0) {
-        gl.glGenTextures(1, &pth.glpic);
+        gl.glGenTextures(1, @ptrCast(&pth.glpic));
     }
 
     gl.glBindTexture(gl.GL_TEXTURE_2D, pth.glpic);

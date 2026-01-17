@@ -67,21 +67,25 @@ pub fn main() !void {
         std.debug.print("Loading RFF: {s}\n", .{rff_path});
 
         // Load RFF archive
-        var rff = fs.rff.loadRFFFromFile(allocator, rff_path) catch |err| {
+        const rff_result = fs.rff.loadRFFFromFile(allocator, rff_path) catch |err| {
             std.debug.print("Failed to load RFF: {}\n", .{err});
             return;
         };
-        defer rff.deinit();
+        var rff = rff_result.archive;
+        defer {
+            rff.deinit();
+            allocator.free(rff_result.data);
+        }
 
         std.debug.print("RFF loaded: {} entries\n", .{rff.entries.len});
 
-        // Load palette
-        if (rff.getEntry("PALETTE.DAT")) |pal_entry| {
-            if (rff.extractEntry(allocator, pal_entry)) |pal_data| {
+        // Load palette (name="PALETTE", type="DAT")
+        if (rff.find("PALETTE", "DAT")) |pal_entry| {
+            if (rff.getData(allocator, pal_entry)) |pal_data| {
                 defer allocator.free(pal_data);
                 if (pal_data.len >= 768) {
-                    @memcpy(&globals.globals.palette, pal_data[0..768]);
-                    globals.globals.numshades = 64; // Blood uses 64 shade levels
+                    @memcpy(&globals.palette, pal_data[0..768]);
+                    globals.numshades = 64; // Blood uses 64 shade levels
                     std.debug.print("Palette loaded\n", .{});
                 }
             } else |_| {
@@ -89,23 +93,18 @@ pub fn main() !void {
             }
         }
 
-        // Load ART files
+        // Load ART files (type="ART")
         var art_count: u32 = 0;
         for (0..20) |file_idx| {
-            var name_buf: [32]u8 = undefined;
-            const art_name = art.getArtFilename(&name_buf, @intCast(file_idx));
+            // ART files are named TILES000, TILES001, etc.
+            var name_buf: [16]u8 = undefined;
+            const art_name = std.fmt.bufPrint(&name_buf, "TILES{d:0>3}", .{file_idx}) catch continue;
 
-            // Try uppercase first
-            var upper_name: [32]u8 = undefined;
-            for (art_name, 0..) |ch, i| {
-                upper_name[i] = std.ascii.toUpper(ch);
-            }
-
-            if (rff.getEntry(upper_name[0..art_name.len])) |art_entry| {
-                if (rff.extractEntry(allocator, art_entry)) |art_data| {
+            if (rff.find(art_name, "ART")) |art_entry| {
+                if (rff.getData(allocator, art_entry)) |art_data| {
                     defer allocator.free(art_data);
                     if (fs.art.loadArt(allocator, art_data)) |art_file| {
-                        var storage = allocator.alloc(u8, fs.art.calculateStorageNeeded(&art_file)) catch continue;
+                        const storage = allocator.alloc(u8, fs.art.calculateStorageNeeded(&art_file)) catch continue;
                         fs.art.loadTilesToGlobals(&art_file, storage);
                         art_count += 1;
                         var temp = art_file;
@@ -116,40 +115,27 @@ pub fn main() !void {
         }
         std.debug.print("Loaded {} ART files\n", .{art_count});
 
-        // Try to load map
-        var map_buf: [64]u8 = undefined;
-        const map_filename = std.fmt.bufPrint(&map_buf, "{s}.MAP", .{map_name}) catch map_name;
-
-        if (rff.getEntry(map_filename)) |map_entry| {
-            if (rff.extractEntry(allocator, map_entry)) |map_data| {
+        // Try to load map (type="MAP")
+        if (rff.find(map_name, "MAP")) |map_entry| {
+            if (rff.getData(allocator, map_entry)) |map_data| {
                 defer allocator.free(map_data);
 
                 var map_result = fs.map.loadBloodMap(allocator, map_data) catch |err| {
                     std.debug.print("Failed to parse map: {}\n", .{err});
                     return;
                 };
-                defer map_result.deinit(allocator);
+                defer map_result.deinit();
 
-                // Apply map data to globals
-                globals.globals.numsectors = map_result.numsectors;
-                globals.globals.numwalls = map_result.numwalls;
-                globals.globals.Numsprites = map_result.numsprites;
+                // Map data is loaded directly into globals by loadBloodMap
+                // Set sprite count (numsectors and numwalls are set by loader)
+                globals.Numsprites = map_result.numsprites;
 
-                for (0..@as(usize, @intCast(map_result.numsectors))) |i| {
-                    globals.globals.sector[i] = map_result.sectors[i];
-                }
-                for (0..@as(usize, @intCast(map_result.numwalls))) |i| {
-                    globals.globals.wall[i] = map_result.walls[i];
-                }
-                for (0..@as(usize, @intCast(map_result.numsprites))) |i| {
-                    globals.globals.sprite[i] = map_result.sprites[i];
-                }
-
-                globals.globals.globalposx = map_result.start_pos.x;
-                globals.globals.globalposy = map_result.start_pos.y;
-                globals.globals.globalposz = map_result.start_pos.z;
-                globals.globals.globalang = @intCast(map_result.start_ang);
-                globals.globals.globalcursectnum = @intCast(map_result.start_sectnum);
+                // Set player start position
+                globals.globalposx = map_result.startx;
+                globals.globalposy = map_result.starty;
+                globals.globalposz = map_result.startz;
+                globals.globalang = @intCast(map_result.startang);
+                globals.globalcursectnum = @intCast(map_result.startsect);
 
                 map_loaded = true;
                 std.debug.print("Map loaded: {s}\n", .{map_name});
@@ -162,7 +148,7 @@ pub fn main() !void {
                 std.debug.print("Failed to extract map: {}\n", .{err});
             }
         } else {
-            std.debug.print("Map not found in RFF: {s}\n", .{map_filename});
+            std.debug.print("Map not found in RFF: {s}\n", .{map_name});
         }
     } else if (std.mem.eql(u8, args[1], "--map")) {
         const map_path = args[2];
@@ -172,27 +158,18 @@ pub fn main() !void {
             std.debug.print("Failed to load map: {}\n", .{err});
             return;
         };
-        defer map_result.deinit(allocator);
+        defer map_result.deinit();
 
-        globals.globals.numsectors = map_result.numsectors;
-        globals.globals.numwalls = map_result.numwalls;
-        globals.globals.Numsprites = map_result.numsprites;
+        // Map data is loaded directly into globals by loadMapFromFile
+        // Set sprite count (numsectors and numwalls are set by loader)
+        globals.Numsprites = map_result.numsprites;
 
-        for (0..@as(usize, @intCast(map_result.numsectors))) |i| {
-            globals.globals.sector[i] = map_result.sectors[i];
-        }
-        for (0..@as(usize, @intCast(map_result.numwalls))) |i| {
-            globals.globals.wall[i] = map_result.walls[i];
-        }
-        for (0..@as(usize, @intCast(map_result.numsprites))) |i| {
-            globals.globals.sprite[i] = map_result.sprites[i];
-        }
-
-        globals.globals.globalposx = map_result.start_pos.x;
-        globals.globals.globalposy = map_result.start_pos.y;
-        globals.globals.globalposz = map_result.start_pos.z;
-        globals.globals.globalang = @intCast(map_result.start_ang);
-        globals.globals.globalcursectnum = @intCast(map_result.start_sectnum);
+        // Set player start position
+        globals.globalposx = map_result.startx;
+        globals.globalposy = map_result.starty;
+        globals.globalposz = map_result.startz;
+        globals.globalang = @intCast(map_result.startang);
+        globals.globalcursectnum = @intCast(map_result.startsect);
 
         map_loaded = true;
     }
@@ -242,11 +219,11 @@ pub fn main() !void {
     _ = c.SDL_GL_SetSwapInterval(1);
 
     // Set up initial viewport
-    globals.globals.xdim = 1280;
-    globals.globals.ydim = 720;
-    globals.globals.viewingrange = 65536;
-    globals.globals.yxaspect = 65536;
-    globals.globals.globalhoriz = types.fix16FromInt(100);
+    globals.xdim = 1280;
+    globals.ydim = 720;
+    globals.viewingrange = 65536;
+    globals.yxaspect = 65536;
+    globals.globalhoriz = types.fix16FromInt(100);
 
     // Initialize polymost
     _ = polymost.render.polymost_init();
@@ -274,7 +251,7 @@ pub fn main() !void {
                     c.SDLK_ESCAPE => running = false,
                     c.SDLK_t => {
                         polymost.render.use_textures = !polymost.render.use_textures;
-                        std.debug.print("Textures: {}\n", .{if (polymost.render.use_textures) "ON" else "OFF"});
+                        std.debug.print("Textures: {s}\n", .{if (polymost.render.use_textures) @as([]const u8, "ON") else @as([]const u8, "OFF")});
                     },
                     else => {},
                 }
@@ -295,47 +272,47 @@ pub fn main() !void {
         const look_speed: i32 = @intFromFloat(50.0 * dt);
 
         // Calculate forward/side vectors
-        const ang = globals.globals.globalang;
-        const cos_ang = globals.globals.getSin(ang + 512); // cos = sin(ang + 90)
-        const sin_ang = globals.globals.getSin(ang);
+        const ang = globals.globalang;
+        const cos_ang = globals.getSin(ang + 512); // cos = sin(ang + 90)
+        const sin_ang = globals.getSin(ang);
 
         // Forward/backward
         if (keys[c.SDL_SCANCODE_W] != 0) {
-            globals.globals.globalposx += @divTrunc(cos_ang * move_speed, 16384);
-            globals.globals.globalposy += @divTrunc(sin_ang * move_speed, 16384);
+            globals.globalposx += @divTrunc(cos_ang * move_speed, 16384);
+            globals.globalposy += @divTrunc(sin_ang * move_speed, 16384);
         }
         if (keys[c.SDL_SCANCODE_S] != 0) {
-            globals.globals.globalposx -= @divTrunc(cos_ang * move_speed, 16384);
-            globals.globals.globalposy -= @divTrunc(sin_ang * move_speed, 16384);
+            globals.globalposx -= @divTrunc(cos_ang * move_speed, 16384);
+            globals.globalposy -= @divTrunc(sin_ang * move_speed, 16384);
         }
 
         // Strafe left/right
         if (keys[c.SDL_SCANCODE_A] != 0) {
-            globals.globals.globalposx -= @divTrunc(sin_ang * move_speed, 16384);
-            globals.globals.globalposy += @divTrunc(cos_ang * move_speed, 16384);
+            globals.globalposx -= @divTrunc(sin_ang * move_speed, 16384);
+            globals.globalposy += @divTrunc(cos_ang * move_speed, 16384);
         }
         if (keys[c.SDL_SCANCODE_D] != 0) {
-            globals.globals.globalposx += @divTrunc(sin_ang * move_speed, 16384);
-            globals.globals.globalposy -= @divTrunc(cos_ang * move_speed, 16384);
+            globals.globalposx += @divTrunc(sin_ang * move_speed, 16384);
+            globals.globalposy -= @divTrunc(cos_ang * move_speed, 16384);
         }
 
         // Turn
         if (keys[c.SDL_SCANCODE_LEFT] != 0) {
-            globals.globals.globalang = @intCast((@as(i32, globals.globals.globalang) - turn_speed) & 2047);
+            globals.globalang = @intCast((@as(i32, globals.globalang) - turn_speed) & 2047);
         }
         if (keys[c.SDL_SCANCODE_RIGHT] != 0) {
-            globals.globals.globalang = @intCast((@as(i32, globals.globals.globalang) + turn_speed) & 2047);
+            globals.globalang = @intCast((@as(i32, globals.globalang) + turn_speed) & 2047);
         }
 
         // Look up/down
-        var horiz = types.fix16ToInt(globals.globals.globalhoriz);
+        var horiz = types.fix16ToInt(globals.globalhoriz);
         if (keys[c.SDL_SCANCODE_UP] != 0) {
             horiz = @min(199, horiz + look_speed);
         }
         if (keys[c.SDL_SCANCODE_DOWN] != 0) {
             horiz = @max(1, horiz - look_speed);
         }
-        globals.globals.globalhoriz = types.fix16FromInt(horiz);
+        globals.globalhoriz = types.fix16FromInt(horiz);
 
         // Clear screen
         const gl = build_engine.gl.bindings;
