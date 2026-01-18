@@ -380,11 +380,20 @@ pub const FixedTimestep = struct {
     /// Maximum ticks per frame (to prevent spiral of death)
     const MAX_TICKS_PER_FRAME: u32 = 10;
 
-    /// Input scale for NBlood-compatible movement
-    /// After posture accel (mulscale16 with 0x4000) and trig (mulscale30 with ~16383),
-    /// input is reduced by ~factor of 4 million. We need large input to compensate.
-    /// Velocity is then shifted right by 12 for position update.
-    pub const INPUT_MAGNITUDE: i32 = 0x400000; // 4194304 - large to compensate for shifts
+    /// Movement speed per tick in BUILD units
+    /// At 120 ticks/sec, 2048 units/tick = 245,760 units/sec
+    /// Blood maps are roughly 1024 units = 1 meter, so this is ~240 m/s
+    /// Adjusted for feel: 512 units/tick = ~61 m/s walking
+    pub const WALK_SPEED: i32 = 512;
+    pub const RUN_SPEED: i32 = 1024;
+
+    /// Turn speed in BUILD angle units per tick
+    /// 6 units/tick * 120 ticks/sec = 720 units/sec
+    /// 2048 units = 360 degrees, so 720/2048 * 360 = ~126 degrees/sec
+    pub const TURN_SPEED: i32 = 6;
+
+    /// Look speed in horizon units per tick
+    pub const LOOK_SPEED: i32 = 1;
 
     /// Initialize with player sprite index
     pub fn init(sprite_idx: usize) FixedTimestep {
@@ -417,9 +426,7 @@ pub const FixedTimestep = struct {
 
     /// Process one physics tick (1/120th second)
     fn tick(self: *FixedTimestep) void {
-        const idx = self.sprite_idx;
-
-        // Apply turning (direct angle change, not velocity-based)
+        // Apply turning (direct angle change)
         if (self.input.turn != 0) {
             const new_ang = @as(i32, globals.globalang) + self.input.turn;
             globals.globalang = @intCast(new_ang & 2047);
@@ -432,28 +439,31 @@ pub const FixedTimestep = struct {
             globals.globalhoriz = @import("../types.zig").fix16FromInt(horiz);
         }
 
-        // Process movement input
-        processInput(
-            idx,
-            globals.globalang,
-            self.input.forward,
-            self.input.strafe,
-            self.posture_type,
-            self.input.is_running,
-        );
+        // Direct position movement (simpler than velocity-based)
+        const speed: i32 = if (self.input.is_running) RUN_SPEED else WALK_SPEED;
 
-        // Apply damping based on posture
-        switch (self.posture_type) {
-            .stand => applyGroundDamping(idx),
-            .swim => applyWaterDamping(idx),
-            .crouch => applyGroundDamping(idx),
+        if (self.input.forward != 0 or self.input.strafe != 0) {
+            // Get direction vectors from angle
+            const cos_ang = globals.getCos(globals.globalang);
+            const sin_ang = globals.getSin(globals.globalang);
+
+            // Forward/backward movement
+            if (self.input.forward != 0) {
+                const move = if (self.input.forward > 0) speed else -speed;
+                // Position += direction * speed / 16384 (normalize trig)
+                globals.globalposx += @divTrunc(@as(i32, cos_ang) * move, 16384);
+                globals.globalposy += @divTrunc(@as(i32, sin_ang) * move, 16384);
+            }
+
+            // Strafe movement (perpendicular to facing direction)
+            if (self.input.strafe != 0) {
+                const move = if (self.input.strafe > 0) speed else -speed;
+                // Strafe right = forward rotated 90 degrees (ang + 512)
+                // cos(ang+90) = -sin(ang), sin(ang+90) = cos(ang)
+                globals.globalposx += @divTrunc(@as(i32, sin_ang) * move, 16384);
+                globals.globalposy -= @divTrunc(@as(i32, cos_ang) * move, 16384);
+            }
         }
-
-        // Clamp velocities
-        clampVelocity(idx);
-
-        // Apply velocity to position
-        applyVelocityToCamera(idx);
     }
 
     /// Set input from key states (call each frame before update)
@@ -469,24 +479,24 @@ pub const FixedTimestep = struct {
         look_down: bool,
         running: bool,
     ) void {
-        // Movement input (magnitude per tick)
+        // Movement direction flags (1, 0, or -1)
         self.input.forward = 0;
-        if (forward) self.input.forward += INPUT_MAGNITUDE;
-        if (backward) self.input.forward -= INPUT_MAGNITUDE;
+        if (forward) self.input.forward = 1;
+        if (backward) self.input.forward = -1;
 
         self.input.strafe = 0;
-        if (strafe_right) self.input.strafe += INPUT_MAGNITUDE;
-        if (strafe_left) self.input.strafe -= INPUT_MAGNITUDE;
+        if (strafe_right) self.input.strafe = 1;
+        if (strafe_left) self.input.strafe = -1;
 
-        // Turn speed: ~4 units per tick = 480 units per second = ~84 degrees/sec
+        // Turn
         self.input.turn = 0;
-        if (turn_right) self.input.turn += 4;
-        if (turn_left) self.input.turn -= 4;
+        if (turn_right) self.input.turn = TURN_SPEED;
+        if (turn_left) self.input.turn = -TURN_SPEED;
 
-        // Look speed
+        // Look
         self.input.look = 0;
-        if (look_up) self.input.look += 1;
-        if (look_down) self.input.look -= 1;
+        if (look_up) self.input.look = LOOK_SPEED;
+        if (look_down) self.input.look = -LOOK_SPEED;
 
         self.input.is_running = running;
     }
