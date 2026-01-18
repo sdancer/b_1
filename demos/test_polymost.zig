@@ -377,6 +377,11 @@ pub fn main() !void {
     var last_time = c.SDL_GetTicks();
     var frame_count: u32 = 0;
 
+    // FPS tracking
+    var fps_last_time = c.SDL_GetTicks();
+    var fps_frame_count: u32 = 0;
+    var current_fps: f32 = 0.0;
+
     while (running) {
         // Handle events
         var event: c.SDL_Event = undefined;
@@ -447,20 +452,6 @@ pub fn main() !void {
         // Apply velocity to camera position
         physics.applyVelocityToCamera(PLAYER_SPRITE_IDX);
 
-        // Debug output when moving
-        if (physics.isMoving(PLAYER_SPRITE_IDX) and frame_count % 30 == 0) {
-            const speed = physics.getHorizontalSpeed(PLAYER_SPRITE_IDX);
-            const deg = @divTrunc(@as(i32, globals.globalang) * 360, 2048);
-            std.debug.print("Moving: ang={d}° speed={} xvel={} yvel={} pos=({}, {}){s}\n", .{
-                deg,
-                speed,
-                globals.xvel[PLAYER_SPRITE_IDX],
-                globals.yvel[PLAYER_SPRITE_IDX],
-                globals.globalposx,
-                globals.globalposy,
-                if (is_running) " [RUNNING]" else "",
-            });
-        }
 
         // Turn
         if (keys[c.SDL_SCANCODE_LEFT] != 0) {
@@ -492,6 +483,30 @@ pub fn main() !void {
         c.SDL_GL_SwapWindow(window);
 
         frame_count += 1;
+        fps_frame_count += 1;
+
+        // Calculate and display FPS every second
+        const fps_current_time = c.SDL_GetTicks();
+        const fps_elapsed = fps_current_time - fps_last_time;
+        if (fps_elapsed >= 1000) {
+            current_fps = @as(f32, @floatFromInt(fps_frame_count)) * 1000.0 / @as(f32, @floatFromInt(fps_elapsed));
+            fps_frame_count = 0;
+            fps_last_time = fps_current_time;
+
+            // Update window title with FPS
+            var title_buf: [128]u8 = undefined;
+            const title = std.fmt.bufPrint(&title_buf, "Polymost Test - {d:.1} FPS - pos({}, {}) ang={}", .{
+                current_fps,
+                globals.globalposx,
+                globals.globalposy,
+                globals.globalang,
+            }) catch "Polymost Test";
+            // Null-terminate for C
+            if (title.len < title_buf.len) {
+                title_buf[title.len] = 0;
+                c.SDL_SetWindowTitle(window, &title_buf);
+            }
+        }
 
         // Screenshot mode: save first frame and exit
         if (screenshot_mode and frame_count == 1) {
