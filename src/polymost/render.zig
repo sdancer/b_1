@@ -326,24 +326,13 @@ fn drawSectorGeometry(sectnum: usize) void {
 /// Whether to use textured rendering (vs color-only)
 pub var use_textures: bool = true;
 
-/// Debug: track sectors we've printed
-var sky_debug_count: u32 = 0;
-
 /// Draw floor or ceiling flat
 fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void {
+    _ = sectnum; // Used for debugging if needed
+
     // Check for parallax (sky) - bit 0 of ceilingstat/floorstat
     // Parallax surfaces should show sky, not a textured flat
     const stat = if (is_ceiling) sec.ceilingstat else sec.floorstat;
-
-    // Debug: print sectors with non-zero ceilingstat or first 20 ceiling draws
-    if (is_ceiling and sky_debug_count < 30) {
-        if (stat != 0 or sky_debug_count < 20) {
-            std.debug.print("Sector {} ceilingstat=0x{X:0>4} picnum={} (parallax={})\n", .{
-                sectnum, stat, sec.ceilingpicnum, (stat & 1) != 0
-            });
-        }
-        sky_debug_count += 1;
-    }
 
     if ((stat & 1) != 0) {
         // Parallax surface - skip drawing (TODO: implement sky rendering)
