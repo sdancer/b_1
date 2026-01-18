@@ -91,18 +91,42 @@ pub fn main() !void {
 
         std.debug.print("RFF loaded: {} entries\n", .{rff.entries.len});
 
-        // Load palette (name="PALETTE", type="DAT")
-        if (rff.find("PALETTE", "DAT")) |pal_entry| {
+        // Load palette (name="BLOOD", type="PAL")
+        if (rff.find("BLOOD", "PAL")) |pal_entry| {
+            std.debug.print("Found BLOOD.PAL, size={}\n", .{pal_entry.size});
             if (rff.getData(allocator, pal_entry)) |pal_data| {
                 defer allocator.free(pal_data);
                 if (pal_data.len >= 768) {
                     @memcpy(&globals.palette, pal_data[0..768]);
                     globals.numshades = 64; // Blood uses 64 shade levels
-                    std.debug.print("Palette loaded\n", .{});
+                    std.debug.print("Palette loaded, first colors: [{},{},{}] [{},{},{}] [{},{},{}]\n", .{
+                        globals.palette[0], globals.palette[1], globals.palette[2],
+                        globals.palette[3], globals.palette[4], globals.palette[5],
+                        globals.palette[6], globals.palette[7], globals.palette[8],
+                    });
                 }
             } else |_| {
                 std.debug.print("Failed to extract palette\n", .{});
             }
+        } else {
+            std.debug.print("BLOOD.PAL not found in RFF!\n", .{});
+        }
+
+        // Load palookup/shade table (name="NORMAL", type="PLU")
+        if (rff.find("NORMAL", "PLU")) |plu_entry| {
+            std.debug.print("Found NORMAL.PLU, size={}\n", .{plu_entry.size});
+            if (rff.getData(allocator, plu_entry)) |plu_data| {
+                // Store the palookup - it persists for the lifetime of the app
+                // PLU is numshades (64) * 256 colors = 16384 bytes
+                if (plu_data.len >= 16384) {
+                    globals.palookup[0] = plu_data.ptr;
+                    std.debug.print("Palookup loaded\n", .{});
+                }
+            } else |_| {
+                std.debug.print("Failed to extract palookup\n", .{});
+            }
+        } else {
+            std.debug.print("NORMAL.PLU not found in RFF!\n", .{});
         }
 
         // Load ART files from disk (they're separate files, not in RFF)
