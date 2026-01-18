@@ -93,27 +93,51 @@ pub fn main() !void {
             }
         }
 
-        // Load ART files (type="ART")
+        // Get directory of RFF file for loading ART files
+        const rff_dir = std.fs.path.dirname(rff_path) orelse ".";
+
+        // Load ART files from disk (they're separate files, not in RFF)
         var art_count: u32 = 0;
         for (0..20) |file_idx| {
-            // ART files are named TILES000, TILES001, etc.
-            var name_buf: [16]u8 = undefined;
-            const art_name = std.fmt.bufPrint(&name_buf, "TILES{d:0>3}", .{file_idx}) catch continue;
+            // Try both lowercase (tiles000.art) and uppercase (TILES000.ART)
+            var name_buf: [256]u8 = undefined;
 
-            if (rff.find(art_name, "ART")) |art_entry| {
-                if (rff.getData(allocator, art_entry)) |art_data| {
-                    defer allocator.free(art_data);
-                    if (fs.art.loadArt(allocator, art_data)) |art_file| {
-                        const storage = allocator.alloc(u8, fs.art.calculateStorageNeeded(&art_file)) catch continue;
-                        fs.art.loadTilesToGlobals(&art_file, storage);
-                        art_count += 1;
-                        var temp = art_file;
-                        temp.deinit();
-                    } else |_| {}
-                } else |_| {}
+            // Try lowercase first
+            var art_path = std.fmt.bufPrint(&name_buf, "{s}/tiles{d:0>3}.art", .{ rff_dir, file_idx }) catch continue;
+            var art_file_result = fs.art.loadArtFromFile(allocator, art_path);
+
+            // If lowercase fails, try uppercase
+            if (art_file_result == error.FileNotFound) {
+                art_path = std.fmt.bufPrint(&name_buf, "{s}/TILES{d:0>3}.ART", .{ rff_dir, file_idx }) catch continue;
+                art_file_result = fs.art.loadArtFromFile(allocator, art_path);
+            }
+
+            if (art_file_result) |art_file_data| {
+                var art_file = art_file_data;
+                const storage = allocator.alloc(u8, fs.art.calculateStorageNeeded(&art_file)) catch continue;
+                fs.art.loadTilesToGlobals(&art_file, storage);
+                std.debug.print("  Loaded {s}: tiles {}-{}\n", .{ art_path, art_file.tilestart, art_file.tileend });
+                art_count += 1;
+                art_file.deinit();
+            } else |_| {
+                // File not found or parse error - skip silently
             }
         }
         std.debug.print("Loaded {} ART files\n", .{art_count});
+
+        // Debug: print some tile sizes
+        std.debug.print("Sample tiles loaded:\n", .{});
+        for (0..20) |i| {
+            const idx = i * 100;
+            if (idx < constants.MAXTILES) {
+                const sx = art.tilesizx[idx];
+                const sy = art.tilesizy[idx];
+                const has_data = art.tiledata[idx] != null;
+                if (sx > 0 and sy > 0) {
+                    std.debug.print("  Tile {}: {}x{} data={}\n", .{ idx, sx, sy, has_data });
+                }
+            }
+        }
 
         // Try to load map (type="MAP")
         if (rff.find(map_name, "MAP")) |map_entry| {
@@ -144,6 +168,25 @@ pub fn main() !void {
                     map_result.numwalls,
                     map_result.numsprites,
                 });
+
+                // Debug: show what tiles the map uses
+                std.debug.print("Sample sector floor tiles:\n", .{});
+                for (0..@min(5, @as(usize, @intCast(globals.numsectors)))) |i| {
+                    const sec = &globals.sector[i];
+                    const fpic = sec.floorpicnum;
+                    const cpic = sec.ceilingpicnum;
+                    const fhas = if (fpic >= 0 and fpic < constants.MAXTILES) art.tiledata[@intCast(fpic)] != null else false;
+                    const chas = if (cpic >= 0 and cpic < constants.MAXTILES) art.tiledata[@intCast(cpic)] != null else false;
+                    std.debug.print("  Sector {}: floor={} (loaded={}), ceil={} (loaded={})\n", .{ i, fpic, fhas, cpic, chas });
+                }
+
+                std.debug.print("Sample wall tiles:\n", .{});
+                for (0..@min(5, @as(usize, @intCast(globals.numwalls)))) |i| {
+                    const wal = &globals.wall[i];
+                    const pic = wal.picnum;
+                    const has = if (pic >= 0 and pic < constants.MAXTILES) art.tiledata[@intCast(pic)] != null else false;
+                    std.debug.print("  Wall {}: picnum={} (loaded={})\n", .{ i, pic, has });
+                }
             } else |err| {
                 std.debug.print("Failed to extract map: {}\n", .{err});
             }
