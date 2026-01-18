@@ -190,7 +190,7 @@ pub var tilesizx: [constants.MAXTILES]i16 = .{0} ** constants.MAXTILES;
 pub var tilesizy: [constants.MAXTILES]i16 = .{0} ** constants.MAXTILES;
 
 /// Global tile animation data
-pub var picanm: [constants.MAXTILES]PicAnm = .{.{
+pub var picanm: [constants.MAXTILES]PicAnm = .{PicAnm{
     .num = 0,
     .animtype = 0,
     .xoffset = 0,
