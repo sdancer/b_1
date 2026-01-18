@@ -81,6 +81,17 @@ pub const platform = struct {
     pub const input = @import("platform/input.zig");
 };
 
+/// Math utilities (fixed-point arithmetic)
+pub const math = struct {
+    pub const mulscale = @import("math/mulscale.zig");
+};
+
+/// Game systems (physics, posture, etc.)
+pub const game = struct {
+    pub const physics = @import("game/physics.zig");
+    pub const posture = @import("game/posture.zig");
+};
+
 // =============================================================================
 // Re-exported Types for Convenience
 // =============================================================================
@@ -190,6 +201,19 @@ pub const isValidWall = globals.isValidWall;
 pub const isValidSprite = globals.isValidSprite;
 
 // =============================================================================
+// Physics System Re-exports
+// =============================================================================
+
+/// Physics module for movement and velocity
+pub const physics = @import("game/physics.zig");
+
+/// Posture definitions for player movement
+pub const posture = @import("game/posture.zig");
+
+/// Fixed-point math functions (mulscale, etc.)
+pub const mulscale = @import("math/mulscale.zig");
+
+// =============================================================================
 // File Loading
 // =============================================================================
 
@@ -238,6 +262,11 @@ test {
     _ = @import("fs/map.zig");
     _ = @import("fs/art.zig");
     _ = @import("fs/rff.zig");
+    // Math utilities
+    _ = @import("math/mulscale.zig");
+    // Game systems (physics, posture)
+    _ = @import("game/physics.zig");
+    _ = @import("game/posture.zig");
     // Note: The following modules require GL context and are tested separately:
     // - gl/state.zig
     // - engine/render.zig, view.zig, rotatesprite.zig

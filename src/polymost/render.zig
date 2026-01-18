@@ -227,8 +227,13 @@ fn setupModelView() void {
     gl.glRotatef(-pitch, 1.0, 0.0, 0.0);
 
     // Then yaw (rotate around Y axis)
-    // Subtract 90 because BUILD 0 is east, but we want to look down +Z
-    gl.glRotatef(-(yaw - 90.0), 0.0, 1.0, 0.0);
+    // BUILD convention: 0=east (+X), 512=north (+Y mapped to +Z in GL)
+    // OpenGL glRotatef transforms world coords; to look at direction D,
+    // we need D to map to -Z (view forward)
+    // To look east (+X): rotation = 90°
+    // To look north (+Z): rotation = 180°
+    // Formula: rotation = 90 + yaw
+    gl.glRotatef(90.0 + yaw, 0.0, 1.0, 0.0);
 
     // Camera position
     // BUILD: X=east, Y=north, Z=height (negative=higher)
@@ -398,13 +403,6 @@ fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void
         } else {
             gl.glColor3f(brightness * 0.5, brightness * 0.4, brightness * 0.3);
         }
-    }
-
-    // Debug: verify texture state before drawing
-    if (debug_sectors_drawn == 1) {
-        var bound_tex: i32 = 0;
-        gl.glGetIntegerv(gl.GL_TEXTURE_BINDING_2D, @ptrCast(&bound_tex));
-        std.debug.print("Draw state: bound_tex={} picnum={}\n", .{ bound_tex, picnum });
     }
 
     // Draw as triangle fan from centroid

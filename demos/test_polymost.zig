@@ -30,6 +30,8 @@ const polymost = build_engine.polymost;
 const platform = build_engine.platform;
 const engine = build_engine.engine;
 const art = build_engine.fs.art;
+const physics = build_engine.physics;
+const posture = build_engine.posture;
 
 // =============================================================================
 // SDL2 C Bindings
@@ -233,6 +235,15 @@ pub fn main() !void {
                 globals.globalang = @intCast(map_result.startang);
                 globals.globalcursectnum = @intCast(map_result.startsect);
 
+                std.debug.print("Map start: pos=({}, {}, {}) ang={} sect={}\n", .{
+                    map_result.startx, map_result.starty, map_result.startz,
+                    map_result.startang, map_result.startsect,
+                });
+
+                // Override starting angle to 0 (east) for testing
+                globals.globalang = 0;
+                std.debug.print("  (overriding angle to 0 for testing)\n", .{});
+
                 map_loaded = true;
                 std.debug.print("Map loaded: {s}\n", .{map_name});
                 std.debug.print("  Sectors: {}, Walls: {}, Sprites: {}\n", .{
@@ -346,10 +357,12 @@ pub fn main() !void {
     std.debug.print("\nControls:\n", .{});
     std.debug.print("  W/S - Move forward/backward\n", .{});
     std.debug.print("  A/D - Strafe left/right\n", .{});
+    std.debug.print("  Shift - Run (hold for faster movement)\n", .{});
     std.debug.print("  Left/Right arrows - Turn\n", .{});
     std.debug.print("  Up/Down arrows - Look up/down\n", .{});
     std.debug.print("  T - Toggle textures\n", .{});
     std.debug.print("  Escape - Quit\n", .{});
+    std.debug.print("\nPhysics: Using NBlood-style velocity-based movement\n", .{});
 
     // Check for --screenshot flag
     var screenshot_mode = false;
@@ -392,34 +405,61 @@ pub fn main() !void {
         // Get keyboard state for movement
         const keys = c.SDL_GetKeyboardState(null);
 
-        // Movement speed
-        const move_speed: i32 = @intFromFloat(50000.0 * dt);
+        // Player sprite index (use 0 for player velocity tracking)
+        const PLAYER_SPRITE_IDX: usize = 0;
+
+        // Input scaling - this gives a good movement feel
+        // Base input magnitude (scales with posture acceleration)
+        const INPUT_SCALE: i32 = @intFromFloat(0x10000 * dt * 30.0); // ~0x10000 at 30fps
+
+        // Turn and look speeds
         const turn_speed: i16 = @intFromFloat(512.0 * dt);
         const look_speed: i32 = @intFromFloat(50.0 * dt);
 
-        // Calculate forward/side vectors
-        const ang = globals.globalang;
-        const cos_ang = globals.getSin(ang + 512); // cos = sin(ang + 90)
-        const sin_ang = globals.getSin(ang);
+        // Check if running (shift key)
+        const is_running = keys[c.SDL_SCANCODE_LSHIFT] != 0 or keys[c.SDL_SCANCODE_RSHIFT] != 0;
 
-        // Forward/backward
-        if (keys[c.SDL_SCANCODE_W] != 0) {
-            globals.globalposx += @divTrunc(cos_ang * move_speed, 16384);
-            globals.globalposy += @divTrunc(sin_ang * move_speed, 16384);
-        }
-        if (keys[c.SDL_SCANCODE_S] != 0) {
-            globals.globalposx -= @divTrunc(cos_ang * move_speed, 16384);
-            globals.globalposy -= @divTrunc(sin_ang * move_speed, 16384);
-        }
+        // Build input vectors
+        var forward: i32 = 0;
+        var strafe: i32 = 0;
 
-        // Strafe left/right
-        if (keys[c.SDL_SCANCODE_A] != 0) {
-            globals.globalposx -= @divTrunc(sin_ang * move_speed, 16384);
-            globals.globalposy += @divTrunc(cos_ang * move_speed, 16384);
-        }
-        if (keys[c.SDL_SCANCODE_D] != 0) {
-            globals.globalposx += @divTrunc(sin_ang * move_speed, 16384);
-            globals.globalposy -= @divTrunc(cos_ang * move_speed, 16384);
+        if (keys[c.SDL_SCANCODE_W] != 0) forward += INPUT_SCALE;
+        if (keys[c.SDL_SCANCODE_S] != 0) forward -= INPUT_SCALE;
+        if (keys[c.SDL_SCANCODE_D] != 0) strafe += INPUT_SCALE;
+        if (keys[c.SDL_SCANCODE_A] != 0) strafe -= INPUT_SCALE;
+
+        // Process input through physics system
+        physics.processInput(
+            PLAYER_SPRITE_IDX,
+            globals.globalang,
+            forward,
+            strafe,
+            .stand,
+            is_running,
+        );
+
+        // Apply ground damping (friction)
+        physics.applyGroundDamping(PLAYER_SPRITE_IDX);
+
+        // Clamp velocities to prevent overflow
+        physics.clampVelocity(PLAYER_SPRITE_IDX);
+
+        // Apply velocity to camera position
+        physics.applyVelocityToCamera(PLAYER_SPRITE_IDX);
+
+        // Debug output when moving
+        if (physics.isMoving(PLAYER_SPRITE_IDX) and frame_count % 30 == 0) {
+            const speed = physics.getHorizontalSpeed(PLAYER_SPRITE_IDX);
+            const deg = @divTrunc(@as(i32, globals.globalang) * 360, 2048);
+            std.debug.print("Moving: ang={d}° speed={} xvel={} yvel={} pos=({}, {}){s}\n", .{
+                deg,
+                speed,
+                globals.xvel[PLAYER_SPRITE_IDX],
+                globals.yvel[PLAYER_SPRITE_IDX],
+                globals.globalposx,
+                globals.globalposy,
+                if (is_running) " [RUNNING]" else "",
+            });
         }
 
         // Turn

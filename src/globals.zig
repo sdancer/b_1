@@ -25,6 +25,19 @@ pub var sprite: [constants.MAXSPRITES]types.SpriteType = undefined;
 pub var tsprite: [constants.MAXSPRITESONSCREEN]types.TSpriteType = undefined;
 
 // =============================================================================
+// Velocity Arrays (per sprite, like NBlood actor.cpp)
+// =============================================================================
+
+/// X velocity for each sprite (BUILD units per frame)
+pub var xvel: [constants.MAXSPRITES]i32 = [_]i32{0} ** constants.MAXSPRITES;
+
+/// Y velocity for each sprite (BUILD units per frame)
+pub var yvel: [constants.MAXSPRITES]i32 = [_]i32{0} ** constants.MAXSPRITES;
+
+/// Z velocity for each sprite (BUILD units per frame)
+pub var zvel: [constants.MAXSPRITES]i32 = [_]i32{0} ** constants.MAXSPRITES;
+
+// =============================================================================
 // Entity Extension Arrays
 // =============================================================================
 
@@ -282,6 +295,11 @@ pub fn initGlobals() void {
     @memset(std.mem.asBytes(&spritesmooth), 0);
     @memset(std.mem.asBytes(&wallext), 0);
 
+    // Zero out velocity arrays
+    for (&xvel) |*v| v.* = 0;
+    for (&yvel) |*v| v.* = 0;
+    for (&zvel) |*v| v.* = 0;
+
     // Reset counts
     numsectors = 0;
     numwalls = 0;
@@ -362,4 +380,99 @@ test "sin table" {
     try std.testing.expect(sintable[512] > 16380);
     // sin(1024) = sin(pi) should be ~0
     try std.testing.expect(@abs(sintable[1024]) < 10);
+}
+
+test "forward movement at all angles" {
+    initSinTable();
+
+    std.debug.print("\n\nForward (W) movement vectors at different angles:\n", .{});
+    std.debug.print("BUILD: 0=east(+X), 512=north(+Y), 1024=west(-X), 1536=south(-Y)\n", .{});
+    std.debug.print("{s:>6} | {s:>7} | {s:>10} | {s:>10} | {s:>7} | {s:>7} | {s}\n", .{ "angle", "deg", "cos(x)", "sin(y)", "dx", "dy", "direction" });
+    std.debug.print("{s:-<6}-+-{s:-<7}-+-{s:-<10}-+-{s:-<10}-+-{s:-<7}-+-{s:-<7}-+-{s:-<12}\n", .{ "", "", "", "", "", "", "" });
+
+    const move_speed: i32 = 16384; // Normalized so divTrunc gives cos/sin directly
+
+    // Test every 128 units (22.5 degrees)
+    var ang: i32 = 0;
+    while (ang < 2048) : (ang += 128) {
+        const x = getCos(@intCast(ang)); // Cos(ang)
+        const y = getSin(@intCast(ang)); // Sin(ang)
+
+        // Forward: dx = cos, dy = sin
+        const dx = @divTrunc(@as(i32, x) * move_speed, 16384);
+        const dy = @divTrunc(@as(i32, y) * move_speed, 16384);
+
+        const degrees = @divTrunc(ang * 360, 2048);
+
+        const dir: []const u8 = if (ang == 0) "east (+X)"
+            else if (ang == 512) "north (+Y)"
+            else if (ang == 1024) "west (-X)"
+            else if (ang == 1536) "south (-Y)"
+            else if (dx > 0 and dy > 0) "NE quadrant"
+            else if (dx < 0 and dy > 0) "NW quadrant"
+            else if (dx < 0 and dy < 0) "SW quadrant"
+            else if (dx > 0 and dy < 0) "SE quadrant"
+            else "?";
+
+        std.debug.print("{d:>6} | {d:>5}° | {d:>10} | {d:>10} | {d:>7} | {d:>7} | {s}\n", .{ ang, degrees, x, y, dx, dy, dir });
+    }
+    std.debug.print("\n", .{});
+}
+
+test "movement vectors at cardinal angles" {
+    initSinTable();
+
+    // BUILD engine angles: 0=east, 512=north, 1024=west, 1536=south
+    // Forward movement should be: x += cos(ang), y += sin(ang)
+    //
+    // Expected movement directions:
+    //   Angle 0 (east):    forward = (+X, 0)    = cos=+max, sin=0
+    //   Angle 512 (north): forward = (0, +Y)    = cos=0, sin=+max
+    //   Angle 1024 (west): forward = (-X, 0)    = cos=-max, sin=0
+    //   Angle 1536 (south): forward = (0, -Y)   = cos=0, sin=-max
+
+    const max: i16 = 16383;
+    const tolerance: i16 = 10;
+
+    // Angle 0 (east): cos=+max, sin=0
+    {
+        const cos_ang = getCos(0);
+        const sin_ang = getSin(0);
+        std.debug.print("\nAngle 0 (east): cos={}, sin={}\n", .{ cos_ang, sin_ang });
+        std.debug.print("  Expected: cos=+{}, sin=0\n", .{max});
+        try std.testing.expect(cos_ang > max - tolerance); // cos should be +max
+        try std.testing.expect(@abs(sin_ang) < tolerance); // sin should be 0
+    }
+
+    // Angle 512 (north): cos=0, sin=+max
+    {
+        const cos_ang = getCos(512);
+        const sin_ang = getSin(512);
+        std.debug.print("\nAngle 512 (north): cos={}, sin={}\n", .{ cos_ang, sin_ang });
+        std.debug.print("  Expected: cos=0, sin=+{}\n", .{max});
+        try std.testing.expect(@abs(cos_ang) < tolerance); // cos should be 0
+        try std.testing.expect(sin_ang > max - tolerance); // sin should be +max
+    }
+
+    // Angle 1024 (west): cos=-max, sin=0
+    {
+        const cos_ang = getCos(1024);
+        const sin_ang = getSin(1024);
+        std.debug.print("\nAngle 1024 (west): cos={}, sin={}\n", .{ cos_ang, sin_ang });
+        std.debug.print("  Expected: cos=-{}, sin=0\n", .{max});
+        try std.testing.expect(cos_ang < -max + tolerance); // cos should be -max
+        try std.testing.expect(@abs(sin_ang) < tolerance); // sin should be 0
+    }
+
+    // Angle 1536 (south): cos=0, sin=-max
+    {
+        const cos_ang = getCos(1536);
+        const sin_ang = getSin(1536);
+        std.debug.print("\nAngle 1536 (south): cos={}, sin={}\n", .{ cos_ang, sin_ang });
+        std.debug.print("  Expected: cos=0, sin=-{}\n", .{max});
+        try std.testing.expect(@abs(cos_ang) < tolerance); // cos should be 0
+        try std.testing.expect(sin_ang < -max + tolerance); // sin should be -max
+    }
+
+    std.debug.print("\nAll movement vector tests passed!\n", .{});
 }
