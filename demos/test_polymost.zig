@@ -4,8 +4,12 @@
 //! with textures using the polymost renderer.
 //!
 //! Usage:
-//!   ./test_polymost --rff <path/to/blood.rff> <mapname>
+//!   ./test_polymost <data_folder> <mapname>
 //!   ./test_polymost --map <path/to/map.map>
+//!
+//! Examples:
+//!   ./test_polymost web/data E1M1
+//!   ./test_polymost --map maps/test.map
 //!
 //! Controls:
 //!   W/S - Move forward/backward
@@ -49,7 +53,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 3) {
-        std.debug.print("Usage: {s} --rff <blood.rff> <mapname>\n", .{args[0]});
+        std.debug.print("Usage: {s} <data_folder> <mapname>\n", .{args[0]});
         std.debug.print("       {s} --map <mapfile.map>\n", .{args[0]});
         return;
     }
@@ -60,9 +64,17 @@ pub fn main() !void {
     // Load data based on arguments
     var map_loaded = false;
 
-    if (std.mem.eql(u8, args[1], "--rff") and args.len >= 4) {
-        const rff_path = args[2];
-        const map_name = args[3];
+    if (!std.mem.eql(u8, args[1], "--map")) {
+        // First arg is data folder, second is map name
+        const data_folder = args[1];
+        const map_name = args[2];
+
+        // Build path to blood.rff
+        var rff_path_buf: [512]u8 = undefined;
+        const rff_path = std.fmt.bufPrint(&rff_path_buf, "{s}/blood.rff", .{data_folder}) catch {
+            std.debug.print("Path too long\n", .{});
+            return;
+        };
 
         std.debug.print("Loading RFF: {s}\n", .{rff_path});
 
@@ -93,9 +105,6 @@ pub fn main() !void {
             }
         }
 
-        // Get directory of RFF file for loading ART files
-        const rff_dir = std.fs.path.dirname(rff_path) orelse ".";
-
         // Load ART files from disk (they're separate files, not in RFF)
         var art_count: u32 = 0;
         for (0..20) |file_idx| {
@@ -103,12 +112,12 @@ pub fn main() !void {
             var name_buf: [256]u8 = undefined;
 
             // Try lowercase first
-            var art_path = std.fmt.bufPrint(&name_buf, "{s}/tiles{d:0>3}.art", .{ rff_dir, file_idx }) catch continue;
+            var art_path = std.fmt.bufPrint(&name_buf, "{s}/tiles{d:0>3}.art", .{ data_folder, file_idx }) catch continue;
             var art_file_result = fs.art.loadArtFromFile(allocator, art_path);
 
             // If lowercase fails, try uppercase
             if (art_file_result == error.FileNotFound) {
-                art_path = std.fmt.bufPrint(&name_buf, "{s}/TILES{d:0>3}.ART", .{ rff_dir, file_idx }) catch continue;
+                art_path = std.fmt.bufPrint(&name_buf, "{s}/TILES{d:0>3}.ART", .{ data_folder, file_idx }) catch continue;
                 art_file_result = fs.art.loadArtFromFile(allocator, art_path);
             }
 
