@@ -3,17 +3,32 @@
 //!            NBlood/source/blood/src/actor.cpp position update & gravity
 //!
 //! This module implements the player movement physics matching NBlood's behavior.
+//! Physics runs at a fixed 120 Hz tick rate (CLOCKTICKSPERSECOND).
 
 const std = @import("std");
 const globals = @import("../globals.zig");
+const constants = @import("../constants.zig");
 const mulscale = @import("../math/mulscale.zig");
 const posture = @import("posture.zig");
+
+// =============================================================================
+// Timing Constants
+// =============================================================================
+
+/// Game logic tick rate (from BUILD engine)
+pub const TICKS_PER_SECOND: i32 = constants.CLOCKTICKSPERSECOND; // 120
+
+/// Microseconds per tick
+pub const TICK_DURATION_US: i64 = 1_000_000 / TICKS_PER_SECOND; // ~8333 us
+
+/// Milliseconds per tick (as float for accumulator)
+pub const TICK_DURATION_MS: f32 = 1000.0 / @as(f32, @floatFromInt(TICKS_PER_SECOND)); // ~8.33 ms
 
 // =============================================================================
 // Physics Constants (from NBlood actor.cpp)
 // =============================================================================
 
-/// Gravity constant applied per frame (from actor.cpp)
+/// Gravity constant applied per tick (from actor.cpp)
 /// zvel[nSprite] += 58254
 pub const GRAVITY: i32 = 58254;
 
@@ -285,7 +300,7 @@ pub fn clampVelocity(sprite_idx: usize) void {
 }
 
 // =============================================================================
-// Complete Physics Step
+// Complete Physics Step (per tick)
 // =============================================================================
 
 /// Run a complete physics step for a sprite on ground
@@ -314,6 +329,155 @@ pub fn stepWaterPhysics(sprite_idx: usize, ang: i16, forward: i32, strafe: i32) 
     clampVelocity(sprite_idx);
     applyVelocityToCamera(sprite_idx);
 }
+
+// =============================================================================
+// Fixed Timestep System (120 Hz)
+// =============================================================================
+
+/// Input state for physics processing
+pub const InputState = struct {
+    forward: i32 = 0, // Positive = forward, negative = backward
+    strafe: i32 = 0, // Positive = right, negative = left
+    turn: i32 = 0, // Positive = right, negative = left (in BUILD angle units per tick)
+    look: i32 = 0, // Positive = up, negative = down
+    is_running: bool = false,
+    jump_pressed: bool = false,
+    crouch_pressed: bool = false,
+};
+
+/// Fixed timestep physics controller
+pub const FixedTimestep = struct {
+    /// Time accumulator in milliseconds
+    accumulator: f32 = 0.0,
+
+    /// Number of ticks processed this frame (for debugging)
+    ticks_this_frame: u32 = 0,
+
+    /// Total ticks processed
+    total_ticks: u64 = 0,
+
+    /// Current input state (updated by game each frame)
+    input: InputState = .{},
+
+    /// Player sprite index
+    sprite_idx: usize = 0,
+
+    /// Current posture
+    posture_type: posture.PostureType = .stand,
+
+    /// Maximum ticks per frame (to prevent spiral of death)
+    const MAX_TICKS_PER_FRAME: u32 = 10;
+
+    /// Input scale for NBlood-compatible movement
+    /// In NBlood, input is typically 0-127 for analog or fixed values for digital
+    /// We use a larger value since we apply posture accel which divides
+    pub const INPUT_MAGNITUDE: i32 = 0x8000; // Base input magnitude per tick
+
+    /// Initialize with player sprite index
+    pub fn init(sprite_idx: usize) FixedTimestep {
+        return .{
+            .sprite_idx = sprite_idx,
+        };
+    }
+
+    /// Update physics with frame delta time
+    /// Returns number of ticks processed
+    pub fn update(self: *FixedTimestep, delta_ms: f32) u32 {
+        self.accumulator += delta_ms;
+        self.ticks_this_frame = 0;
+
+        // Process fixed timestep ticks
+        while (self.accumulator >= TICK_DURATION_MS and self.ticks_this_frame < MAX_TICKS_PER_FRAME) {
+            self.tick();
+            self.accumulator -= TICK_DURATION_MS;
+            self.ticks_this_frame += 1;
+            self.total_ticks += 1;
+        }
+
+        // If we hit max ticks, discard remaining time to prevent spiral
+        if (self.ticks_this_frame >= MAX_TICKS_PER_FRAME) {
+            self.accumulator = 0;
+        }
+
+        return self.ticks_this_frame;
+    }
+
+    /// Process one physics tick (1/120th second)
+    fn tick(self: *FixedTimestep) void {
+        const idx = self.sprite_idx;
+
+        // Apply turning (direct angle change, not velocity-based)
+        if (self.input.turn != 0) {
+            const new_ang = @as(i32, globals.globalang) + self.input.turn;
+            globals.globalang = @intCast(new_ang & 2047);
+        }
+
+        // Apply look up/down
+        if (self.input.look != 0) {
+            var horiz = @import("../types.zig").fix16ToInt(globals.globalhoriz);
+            horiz = mulscale.clamp(horiz + self.input.look, 1, 199);
+            globals.globalhoriz = @import("../types.zig").fix16FromInt(horiz);
+        }
+
+        // Process movement input
+        processInput(
+            idx,
+            globals.globalang,
+            self.input.forward,
+            self.input.strafe,
+            self.posture_type,
+            self.input.is_running,
+        );
+
+        // Apply damping based on posture
+        switch (self.posture_type) {
+            .stand => applyGroundDamping(idx),
+            .swim => applyWaterDamping(idx),
+            .crouch => applyGroundDamping(idx),
+        }
+
+        // Clamp velocities
+        clampVelocity(idx);
+
+        // Apply velocity to position
+        applyVelocityToCamera(idx);
+    }
+
+    /// Set input from key states (call each frame before update)
+    pub fn setInput(
+        self: *FixedTimestep,
+        forward: bool,
+        backward: bool,
+        strafe_left: bool,
+        strafe_right: bool,
+        turn_left: bool,
+        turn_right: bool,
+        look_up: bool,
+        look_down: bool,
+        running: bool,
+    ) void {
+        // Movement input (magnitude per tick)
+        self.input.forward = 0;
+        if (forward) self.input.forward += INPUT_MAGNITUDE;
+        if (backward) self.input.forward -= INPUT_MAGNITUDE;
+
+        self.input.strafe = 0;
+        if (strafe_right) self.input.strafe += INPUT_MAGNITUDE;
+        if (strafe_left) self.input.strafe -= INPUT_MAGNITUDE;
+
+        // Turn speed: ~4 units per tick = 480 units per second = ~84 degrees/sec
+        self.input.turn = 0;
+        if (turn_right) self.input.turn += 4;
+        if (turn_left) self.input.turn -= 4;
+
+        // Look speed
+        self.input.look = 0;
+        if (look_up) self.input.look += 1;
+        if (look_down) self.input.look -= 1;
+
+        self.input.is_running = running;
+    }
+};
 
 // =============================================================================
 // Tests

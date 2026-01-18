@@ -362,7 +362,11 @@ pub fn main() !void {
     std.debug.print("  Up/Down arrows - Look up/down\n", .{});
     std.debug.print("  T - Toggle textures\n", .{});
     std.debug.print("  Escape - Quit\n", .{});
-    std.debug.print("\nPhysics: Using NBlood-style velocity-based movement\n", .{});
+    std.debug.print("\nPhysics: Fixed 120 Hz timestep (NBlood-style)\n", .{});
+
+    // Initialize fixed timestep physics controller
+    const PLAYER_SPRITE_IDX: usize = 0;
+    var physics_controller = physics.FixedTimestep.init(PLAYER_SPRITE_IDX);
 
     // Check for --screenshot flag
     var screenshot_mode = false;
@@ -402,76 +406,29 @@ pub fn main() !void {
             }
         }
 
-        // Calculate delta time
+        // Calculate delta time in milliseconds
         const current_time = c.SDL_GetTicks();
-        const dt: f32 = @as(f32, @floatFromInt(current_time - last_time)) / 1000.0;
+        const delta_ms: f32 = @floatFromInt(current_time - last_time);
         last_time = current_time;
 
         // Get keyboard state for movement
         const keys = c.SDL_GetKeyboardState(null);
 
-        // Player sprite index (use 0 for player velocity tracking)
-        const PLAYER_SPRITE_IDX: usize = 0;
-
-        // Input scaling - NBlood uses large raw values
-        // The physics system applies posture accel (0x4000) then mulscale30 with trig
-        // To get noticeable movement: input * 0x4000 >> 16 * 16383 >> 30 * damping >> 12
-        // We need input around 0x200000 to get decent movement after all the shifts
-        const INPUT_SCALE: i32 = @intFromFloat(0x200000 * dt * 60.0); // Large value for physics system
-
-        // Turn and look speeds
-        const turn_speed: i16 = @intFromFloat(512.0 * dt);
-        const look_speed: i32 = @intFromFloat(50.0 * dt);
-
-        // Check if running (shift key)
-        const is_running = keys[c.SDL_SCANCODE_LSHIFT] != 0 or keys[c.SDL_SCANCODE_RSHIFT] != 0;
-
-        // Build input vectors
-        var forward: i32 = 0;
-        var strafe: i32 = 0;
-
-        if (keys[c.SDL_SCANCODE_W] != 0) forward += INPUT_SCALE;
-        if (keys[c.SDL_SCANCODE_S] != 0) forward -= INPUT_SCALE;
-        if (keys[c.SDL_SCANCODE_D] != 0) strafe += INPUT_SCALE;
-        if (keys[c.SDL_SCANCODE_A] != 0) strafe -= INPUT_SCALE;
-
-        // Process input through physics system
-        physics.processInput(
-            PLAYER_SPRITE_IDX,
-            globals.globalang,
-            forward,
-            strafe,
-            .stand,
-            is_running,
+        // Set input state for physics controller
+        physics_controller.setInput(
+            keys[c.SDL_SCANCODE_W] != 0, // forward
+            keys[c.SDL_SCANCODE_S] != 0, // backward
+            keys[c.SDL_SCANCODE_A] != 0, // strafe_left
+            keys[c.SDL_SCANCODE_D] != 0, // strafe_right
+            keys[c.SDL_SCANCODE_LEFT] != 0, // turn_left
+            keys[c.SDL_SCANCODE_RIGHT] != 0, // turn_right
+            keys[c.SDL_SCANCODE_UP] != 0, // look_up
+            keys[c.SDL_SCANCODE_DOWN] != 0, // look_down
+            keys[c.SDL_SCANCODE_LSHIFT] != 0 or keys[c.SDL_SCANCODE_RSHIFT] != 0, // running
         );
 
-        // Apply ground damping (friction)
-        physics.applyGroundDamping(PLAYER_SPRITE_IDX);
-
-        // Clamp velocities to prevent overflow
-        physics.clampVelocity(PLAYER_SPRITE_IDX);
-
-        // Apply velocity to camera position
-        physics.applyVelocityToCamera(PLAYER_SPRITE_IDX);
-
-
-        // Turn
-        if (keys[c.SDL_SCANCODE_LEFT] != 0) {
-            globals.globalang = @intCast((@as(i32, globals.globalang) - turn_speed) & 2047);
-        }
-        if (keys[c.SDL_SCANCODE_RIGHT] != 0) {
-            globals.globalang = @intCast((@as(i32, globals.globalang) + turn_speed) & 2047);
-        }
-
-        // Look up/down
-        var horiz = types.fix16ToInt(globals.globalhoriz);
-        if (keys[c.SDL_SCANCODE_UP] != 0) {
-            horiz = @min(199, horiz + look_speed);
-        }
-        if (keys[c.SDL_SCANCODE_DOWN] != 0) {
-            horiz = @max(1, horiz - look_speed);
-        }
-        globals.globalhoriz = types.fix16FromInt(horiz);
+        // Update physics at fixed 120 Hz timestep
+        _ = physics_controller.update(delta_ms);
 
         // Clear screen
         const gl = build_engine.gl.bindings;
@@ -495,13 +452,12 @@ pub fn main() !void {
             fps_frame_count = 0;
             fps_last_time = fps_current_time;
 
-            // Update window title with FPS
+            // Update window title with FPS and tick info
             var title_buf: [128]u8 = undefined;
-            const title = std.fmt.bufPrint(&title_buf, "Polymost Test - {d:.1} FPS - pos({}, {}) ang={}", .{
+            const title = std.fmt.bufPrint(&title_buf, "Polymost - {d:.0} FPS | 120Hz physics | pos({}, {})", .{
                 current_fps,
                 globals.globalposx,
                 globals.globalposy,
-                globals.globalang,
             }) catch "Polymost Test";
             // Null-terminate for C
             if (title.len < title_buf.len) {
