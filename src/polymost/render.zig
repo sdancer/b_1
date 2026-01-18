@@ -326,11 +326,23 @@ fn drawSectorGeometry(sectnum: usize) void {
 /// Whether to use textured rendering (vs color-only)
 pub var use_textures: bool = true;
 
+/// Debug: track if we've printed sky debug info
+var sky_debug_printed: bool = false;
+
 /// Draw floor or ceiling flat
 fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void {
     // Check for parallax (sky) - bit 0 of ceilingstat/floorstat
     // Parallax surfaces should show sky, not a textured flat
     const stat = if (is_ceiling) sec.ceilingstat else sec.floorstat;
+
+    // Debug: print first few sectors' ceilingstat
+    if (!sky_debug_printed and is_ceiling and sectnum < 10) {
+        std.debug.print("Sector {} ceilingstat=0x{X:0>4} (parallax={})\n", .{
+            sectnum, stat, (stat & 1) != 0
+        });
+        if (sectnum == 9) sky_debug_printed = true;
+    }
+
     if ((stat & 1) != 0) {
         // Parallax surface - skip drawing (TODO: implement sky rendering)
         return;
@@ -422,7 +434,6 @@ fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void
     // Apply floor/ceiling panning
     const xpan: f32 = @as(f32, @floatFromInt(if (is_ceiling) sec.ceilingxpanning else sec.floorxpanning)) / 256.0;
     const ypan: f32 = @as(f32, @floatFromInt(if (is_ceiling) sec.ceilingypanning else sec.floorypanning)) / 256.0;
-    _ = sectnum;
 
     // Center vertex
     gl.glTexCoord2f(cx * tex_scale + xpan, cz * tex_scale + ypan);
