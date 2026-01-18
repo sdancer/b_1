@@ -421,8 +421,20 @@ fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void
     gl.glVertex3f(cx, z, cz);
 
     // Perimeter vertices - wind correctly for ceiling vs floor
+    // BUILD walls go clockwise when viewed from above.
+    // Floor (viewed from above): need CCW for front face -> REVERSE order
+    // Ceiling (viewed from below): CW from above = CCW from below -> NORMAL order
     if (is_ceiling) {
-        // Ceiling: reverse winding
+        // Ceiling: normal winding (CW from above = CCW from below)
+        for (0..vertex_count) |i| {
+            gl.glTexCoord2f(verts_x[i] * tex_scale + xpan, verts_z[i] * tex_scale + ypan);
+            gl.glVertex3f(verts_x[i], z, verts_z[i]);
+        }
+        // Close the fan
+        gl.glTexCoord2f(verts_x[0] * tex_scale + xpan, verts_z[0] * tex_scale + ypan);
+        gl.glVertex3f(verts_x[0], z, verts_z[0]);
+    } else {
+        // Floor: reverse winding (to get CCW from above)
         var i: usize = vertex_count;
         while (i > 0) {
             i -= 1;
@@ -432,15 +444,6 @@ fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void
         // Close the fan
         gl.glTexCoord2f(verts_x[vertex_count - 1] * tex_scale + xpan, verts_z[vertex_count - 1] * tex_scale + ypan);
         gl.glVertex3f(verts_x[vertex_count - 1], z, verts_z[vertex_count - 1]);
-    } else {
-        // Floor: normal winding
-        for (0..vertex_count) |i| {
-            gl.glTexCoord2f(verts_x[i] * tex_scale + xpan, verts_z[i] * tex_scale + ypan);
-            gl.glVertex3f(verts_x[i], z, verts_z[i]);
-        }
-        // Close the fan
-        gl.glTexCoord2f(verts_x[0] * tex_scale + xpan, verts_z[0] * tex_scale + ypan);
-        gl.glVertex3f(verts_x[0], z, verts_z[0]);
     }
 
     gl.glEnd();
