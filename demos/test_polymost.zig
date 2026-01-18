@@ -327,8 +327,10 @@ pub fn main() !void {
             if (event.type == c.SDL_QUIT) {
                 running = false;
             } else if (event.type == c.SDL_KEYDOWN) {
-                switch (event.key.keysym.sym) {
-                    c.SDLK_ESCAPE => running = false,
+                const sym = event.key.keysym.sym;
+                if (sym == c.SDLK_ESCAPE) {
+                    running = false;
+                } else switch (sym) {
                     c.SDLK_t => {
                         polymost.render.use_textures = !polymost.render.use_textures;
                         std.debug.print("Textures: {s}\n", .{if (polymost.render.use_textures) @as([]const u8, "ON") else @as([]const u8, "OFF")});
