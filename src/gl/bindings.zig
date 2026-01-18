@@ -191,6 +191,7 @@ pub const GL_STREAM_DRAW: GLenum = 0x88E0;
 // Texture targets
 pub const GL_TEXTURE_1D: GLenum = 0x0DE0;
 pub const GL_TEXTURE_2D: GLenum = 0x0DE1;
+pub const GL_TEXTURE_BINDING_2D: GLenum = 0x8069;
 pub const GL_TEXTURE_3D: GLenum = 0x806F;
 pub const GL_TEXTURE_CUBE_MAP: GLenum = 0x8513;
 

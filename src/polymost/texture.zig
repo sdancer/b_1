@@ -132,12 +132,12 @@ pub fn setupTexture(dameth: i32, filter: i32) void {
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, wrapS);
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, wrapT);
 
-    // Filter mode
+    // Filter mode - use LINEAR, not MIPMAP since we don't generate mipmaps
     var minFilter: i32 = gl.GL_NEAREST;
     var magFilter: i32 = gl.GL_NEAREST;
 
     if (filter > 0) {
-        minFilter = gl.GL_LINEAR_MIPMAP_LINEAR;
+        minFilter = gl.GL_LINEAR;  // Changed from GL_LINEAR_MIPMAP_LINEAR
         magFilter = gl.GL_LINEAR;
     }
 
@@ -368,6 +368,15 @@ pub fn gloadtile_art(
     // Get palette (base palette from engine globals)
     const palette_data = &globals.palette;
 
+    // Debug: check if palette has colors (only once)
+    if (debug_tex_loads == 0) {
+        std.debug.print("Texture palette check: pal[0]={},{},{} pal[48]={},{},{} pal[144]={},{},{}\n", .{
+            palette_data[0], palette_data[1], palette_data[2],
+            palette_data[48 * 3], palette_data[48 * 3 + 1], palette_data[48 * 3 + 2],
+            palette_data[144 * 3], palette_data[144 * 3 + 1], palette_data[144 * 3 + 2],
+        });
+    }
+
     // Get palookup (shade table) if available
     const pal_idx: usize = if (pal >= 0 and pal < constants.MAXPALOOKUPS) @intCast(pal) else 0;
     const palookup_ptr = globals.palookup[pal_idx];
@@ -378,6 +387,9 @@ pub fn gloadtile_art(
         std.math.clamp(shade, 0, numshades_i32 - 1)
     else
         0;
+
+    // Debug: trace first pixel of first texture
+    var debug_first_pixel = (debug_tex_loads == 0);
 
     // Convert tile pixels to RGBA
     // BUILD tiles are stored column-major (x is outer loop)
@@ -392,6 +404,11 @@ pub fn gloadtile_art(
             if (dst_idx >= buf_size) continue;
 
             const color_idx = pixels[src_idx];
+
+            if (debug_first_pixel) {
+                std.debug.print("First pixel: color_idx={}", .{color_idx});
+                debug_first_pixel = false;
+            }
 
             // Index 255 is transparent in BUILD engine
             if (color_idx == 255) {
@@ -410,16 +427,40 @@ pub fn gloadtile_art(
             // Note: Blood's palette is already 8-bit (unlike Duke3D which uses 6-bit)
             const pal_offset = @as(usize, final_idx) * 3;
             if (pal_offset + 2 < palette_data.len) {
-                rgba_buf[dst_idx] = .{
-                    .r = palette_data[pal_offset + 0],
-                    .g = palette_data[pal_offset + 1],
-                    .b = palette_data[pal_offset + 2],
-                    .a = 255,
-                };
+                const r = palette_data[pal_offset + 0];
+                const g = palette_data[pal_offset + 1];
+                const b = palette_data[pal_offset + 2];
+
+                // Debug first few non-transparent pixels
+                if (debug_tex_loads == 0 and tx < 3 and ty < 3 and color_idx != 255) {
+                    std.debug.print(" -> final_idx={} -> RGB={},{},{}\n", .{ final_idx, r, g, b });
+                }
+
+                rgba_buf[dst_idx] = .{ .r = r, .g = g, .b = b, .a = 255 };
             } else {
                 rgba_buf[dst_idx] = .{ .r = 255, .g = 0, .b = 255, .a = 255 }; // Magenta for debug
             }
         }
+    }
+
+    // Debug: verify RGBA buffer has colors for specific tiles
+    if (picnum == 346 or picnum == 253 or debug_tex_loads == 0) {
+        var has_color = false;
+        var sample_r: u8 = 0;
+        var sample_g: u8 = 0;
+        var sample_b: u8 = 0;
+        for (rgba_buf[0..@min(100, rgba_buf.len)]) |col| {
+            if (col.a > 0) { // Non-transparent pixel
+                sample_r = col.r;
+                sample_g = col.g;
+                sample_b = col.b;
+                if (col.r != col.g or col.g != col.b) {
+                    has_color = true;
+                    break;
+                }
+            }
+        }
+        std.debug.print("Tile {} RGBA: R={} G={} B={} hasColor={}\n", .{ picnum, sample_r, sample_g, sample_b, has_color });
     }
 
     // Create or update OpenGL texture
@@ -439,6 +480,12 @@ pub fn gloadtile_art(
             gl.GL_UNSIGNED_BYTE,
             @ptrCast(rgba_buf.ptr),
         );
+
+        // Check for GL errors
+        const err = gl.glGetError();
+        if (err != 0 and debug_tex_loads < 3) {
+            std.debug.print("GL ERROR after glTexImage2D: 0x{x}\n", .{err});
+        }
     } else {
         gl.glBindTexture(gl.GL_TEXTURE_2D, pth.glpic);
         gl.glTexSubImage2D(

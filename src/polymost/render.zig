@@ -90,6 +90,9 @@ pub fn polymost_glinit() void {
     // Enable texturing
     gl.glEnable(gl.GL_TEXTURE_2D);
 
+    // Set texture environment to MODULATE (texture * vertex color for lighting)
+    gl.glTexEnvi(gl.GL_TEXTURE_ENV, gl.GL_TEXTURE_ENV_MODE, gl.GL_MODULATE);
+
     // Enable depth testing
     gl.glEnable(gl.GL_DEPTH_TEST);
     gl.glDepthFunc(gl.GL_LEQUAL);
@@ -166,9 +169,13 @@ pub fn polymost_drawrooms() void {
 
     // Print texture stats after first frame
     frame_count += 1;
-    if (frame_count == 2) {
+    if (frame_count == 1) {
+        std.debug.print("Render stats: sectors={} textures_bound={}\n", .{ debug_sectors_drawn, debug_textures_bound });
         texture.debugPrintStats();
     }
+    // Reset for next frame
+    debug_sectors_drawn = 0;
+    debug_textures_bound = 0;
 }
 
 /// Set up the projection matrix (perspective)
@@ -285,10 +292,15 @@ fn renderVisibleSectors() void {
 // Sector Rendering
 // =============================================================================
 
+/// Debug counter for sectors rendered
+var debug_sectors_drawn: usize = 0;
+var debug_textures_bound: usize = 0;
+
 /// Draw all geometry for a sector (floor, ceiling, walls)
 fn drawSectorGeometry(sectnum: usize) void {
     if (sectnum >= @as(usize, @intCast(globals.numsectors))) return;
 
+    debug_sectors_drawn += 1;
     const sec = &globals.sector[sectnum];
 
     // Draw floor
@@ -369,6 +381,7 @@ fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void
             gl.glEnable(gl.GL_TEXTURE_2D);
             gl.glBindTexture(gl.GL_TEXTURE_2D, p.glpic);
             gl.glColor4f(brightness, brightness, brightness, 1.0);
+            debug_textures_bound += 1;
         } else {
             gl.glDisable(gl.GL_TEXTURE_2D);
             if (is_ceiling) {
@@ -385,6 +398,13 @@ fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void
         } else {
             gl.glColor3f(brightness * 0.5, brightness * 0.4, brightness * 0.3);
         }
+    }
+
+    // Debug: verify texture state before drawing
+    if (debug_sectors_drawn == 1) {
+        var bound_tex: i32 = 0;
+        gl.glGetIntegerv(gl.GL_TEXTURE_BINDING_2D, @ptrCast(&bound_tex));
+        std.debug.print("Draw state: bound_tex={} picnum={}\n", .{ bound_tex, picnum });
     }
 
     // Draw as triangle fan from centroid

@@ -40,6 +40,41 @@ const c = @cImport({
 });
 
 // =============================================================================
+// Screenshot Function
+// =============================================================================
+
+fn saveScreenshot(allocator: std.mem.Allocator, width: u32, height: u32) !void {
+    const gl = build_engine.gl.bindings;
+
+    // Allocate buffer for pixel data (RGB)
+    const size = width * height * 3;
+    const pixels = try allocator.alloc(u8, size);
+    defer allocator.free(pixels);
+
+    // Read pixels from OpenGL framebuffer
+    gl.glReadPixels(0, 0, @intCast(width), @intCast(height), gl.GL_RGB, gl.GL_UNSIGNED_BYTE, pixels.ptr);
+
+    // Write PPM file (simple format)
+    const file = try std.fs.cwd().createFile("screenshot.ppm", .{});
+    defer file.close();
+
+    // PPM header
+    var header_buf: [64]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, "P6\n{} {}\n255\n", .{ width, height }) catch return error.BufferTooSmall;
+    try file.writeAll(header);
+
+    // PPM stores top-to-bottom, but OpenGL reads bottom-to-top, so flip
+    var y: u32 = height;
+    while (y > 0) {
+        y -= 1;
+        const row_start = y * width * 3;
+        try file.writeAll(pixels[row_start .. row_start + width * 3]);
+    }
+
+    std.debug.print("Screenshot saved to screenshot.ppm\n", .{});
+}
+
+// =============================================================================
 // Main Application
 // =============================================================================
 
@@ -316,9 +351,18 @@ pub fn main() !void {
     std.debug.print("  T - Toggle textures\n", .{});
     std.debug.print("  Escape - Quit\n", .{});
 
+    // Check for --screenshot flag
+    var screenshot_mode = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--screenshot")) {
+            screenshot_mode = true;
+        }
+    }
+
     // Main loop
     var running = true;
     var last_time = c.SDL_GetTicks();
+    var frame_count: u32 = 0;
 
     while (running) {
         // Handle events
@@ -406,6 +450,16 @@ pub fn main() !void {
 
         // Swap buffers
         c.SDL_GL_SwapWindow(window);
+
+        frame_count += 1;
+
+        // Screenshot mode: save first frame and exit
+        if (screenshot_mode and frame_count == 1) {
+            saveScreenshot(allocator, 1280, 720) catch |err| {
+                std.debug.print("Failed to save screenshot: {}\n", .{err});
+            };
+            running = false;
+        }
     }
 
     std.debug.print("Shutting down...\n", .{});

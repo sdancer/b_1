@@ -46,11 +46,11 @@ pub const PthType = struct {
 // Color Type
 // =============================================================================
 
-/// RGBA color type (matches BUILD engine ColType)
+/// RGBA color type for OpenGL (R, G, B, A memory order)
 pub const ColType = extern struct {
-    b: u8 = 0,
-    g: u8 = 0,
     r: u8 = 0,
+    g: u8 = 0,
+    b: u8 = 0,
     a: u8 = 255,
 
     pub fn init(r: u8, g: u8, b: u8, a: u8) ColType {
@@ -59,17 +59,17 @@ pub const ColType = extern struct {
 
     pub fn fromU32(c: u32) ColType {
         return .{
-            .b = @intCast(c & 0xFF),
+            .r = @intCast(c & 0xFF),
             .g = @intCast((c >> 8) & 0xFF),
-            .r = @intCast((c >> 16) & 0xFF),
+            .b = @intCast((c >> 16) & 0xFF),
             .a = @intCast((c >> 24) & 0xFF),
         };
     }
 
     pub fn toU32(self: ColType) u32 {
-        return @as(u32, self.b) |
+        return @as(u32, self.r) |
             (@as(u32, self.g) << 8) |
-            (@as(u32, self.r) << 16) |
+            (@as(u32, self.b) << 16) |
             (@as(u32, self.a) << 24);
     }
 };
