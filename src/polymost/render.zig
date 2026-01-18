@@ -127,6 +127,9 @@ pub fn polymost_glreset() void {
 // Main Drawing Functions
 // =============================================================================
 
+/// Frame counter for debug output
+var frame_count: u32 = 0;
+
 /// Main polymost draw rooms function
 /// This is the entry point for rendering the 3D view
 pub fn polymost_drawrooms() void {
@@ -160,6 +163,12 @@ pub fn polymost_drawrooms() void {
 
     // Render visible sectors using BFS from current sector
     renderVisibleSectors();
+
+    // Print texture stats after first frame
+    frame_count += 1;
+    if (frame_count == 2) {
+        texture.debugPrintStats();
+    }
 }
 
 /// Set up the projection matrix (perspective)

@@ -546,6 +546,11 @@ pub fn gloadtile_hi(
 var pth_pool: [4096]PthType = undefined;
 var pth_pool_used: usize = 0;
 
+/// Debug: count texture loads
+var debug_tex_loads: usize = 0;
+var debug_tex_cache_hits: usize = 0;
+var debug_reported: bool = false;
+
 /// Get or load a texture for rendering
 /// This is the main entry point for acquiring a texture before drawing.
 pub fn gltex(picnum: i32, palnum: i32, dameth: i32) ?*PthType {
@@ -556,6 +561,7 @@ pub fn gltex(picnum: i32, palnum: i32, dameth: i32) ?*PthType {
     if (findTexture(@intCast(picnum), @intCast(if (palnum >= 0 and palnum < 256) palnum else 0), dameth)) |pth| {
         // Check if texture needs reload (marked invalid)
         if (pth.glpic != 0) {
+            debug_tex_cache_hits += 1;
             return pth;
         }
     }
@@ -563,6 +569,7 @@ pub fn gltex(picnum: i32, palnum: i32, dameth: i32) ?*PthType {
     // Allocate new cache entry
     if (pth_pool_used >= pth_pool.len) {
         // Cache full, can't allocate
+        std.debug.print("WARNING: Texture pool exhausted!\n", .{});
         return null;
     }
 
@@ -583,10 +590,38 @@ pub fn gltex(picnum: i32, palnum: i32, dameth: i32) ?*PthType {
     const shade: i32 = pm_globals.globalshade;
     gloadtile_art(picnum, palnum, shade, dameth, pth, 1);
 
+    debug_tex_loads += 1;
+
+    // Debug: report first few texture loads
+    if (debug_tex_loads <= 5) {
+        const idx: usize = @intCast(picnum);
+        std.debug.print("  Loaded tex #{}: picnum={} glpic={} size={}x{} tiledata={}\n", .{
+            debug_tex_loads,
+            picnum,
+            pth.glpic,
+            pth.siz.x,
+            pth.siz.y,
+            art.tiledata[idx] != null,
+        });
+    }
+
     // Add to cache
     addTexture(pth);
 
     return pth;
+}
+
+/// Print texture stats (call once per second or on demand)
+pub fn debugPrintStats() void {
+    if (!debug_reported and debug_tex_loads > 0) {
+        std.debug.print("Texture stats: {} loaded, {} cache hits, pool={}/{}\n", .{
+            debug_tex_loads,
+            debug_tex_cache_hits,
+            pth_pool_used,
+            pth_pool.len,
+        });
+        debug_reported = true;
+    }
 }
 
 /// Reset the texture pool (for testing or reload)
