@@ -12,12 +12,15 @@ pub fn build(b: *std.Build) void {
     // Option to skip OpenGL linking (for systems without GL)
     const skip_gl = b.option(bool, "skip-gl", "Skip OpenGL linking") orelse false;
 
-    // Main library
-    const lib = b.addStaticLibrary(.{
+    // Main library - Zig 0.15 API: use addLibrary with linkage and root_module
+    const lib = b.addLibrary(.{
+        .linkage = .static,
         .name = "build_engine",
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     // Link OpenGL (optional)
@@ -35,9 +38,11 @@ pub fn build(b: *std.Build) void {
     // Map Viewer Demo (2D output to BMP)
     const mapview_exe = b.addExecutable(.{
         .name = "mapview",
-        .root_source_file = b.path("demos/mapview.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demos/mapview.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     mapview_exe.root_module.addImport("build_engine", lib_mod);
     b.installArtifact(mapview_exe);
@@ -55,9 +60,11 @@ pub fn build(b: *std.Build) void {
     // RFF Lister Tool
     const rff_list_exe = b.addExecutable(.{
         .name = "rff_list",
-        .root_source_file = b.path("demos/rff_list.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demos/rff_list.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     rff_list_exe.root_module.addImport("build_engine", lib_mod);
     b.installArtifact(rff_list_exe);
@@ -65,9 +72,11 @@ pub fn build(b: *std.Build) void {
     // Debug Map Tool
     const debug_map_exe = b.addExecutable(.{
         .name = "debug_map",
-        .root_source_file = b.path("demos/debug_map.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demos/debug_map.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     debug_map_exe.root_module.addImport("build_engine", lib_mod);
     b.installArtifact(debug_map_exe);
@@ -79,9 +88,11 @@ pub fn build(b: *std.Build) void {
     // 3D Map Explorer - only build if SDL2/GL are available
     const explore3d_exe = b.addExecutable(.{
         .name = "explore3d",
-        .root_source_file = b.path("demos/explore3d.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demos/explore3d.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     explore3d_exe.root_module.addImport("build_engine", lib_mod);
     explore3d_exe.linkSystemLibrary("SDL2");
@@ -109,9 +120,11 @@ pub fn build(b: *std.Build) void {
 
     const test_polymost_exe = b.addExecutable(.{
         .name = "test_polymost",
-        .root_source_file = b.path("demos/test_polymost.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demos/test_polymost.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     test_polymost_exe.root_module.addImport("build_engine", lib_mod);
     test_polymost_exe.linkSystemLibrary("SDL2");
@@ -190,9 +203,11 @@ pub fn build(b: *std.Build) void {
 
     const wasm_exe = b.addExecutable(.{
         .name = "explore3d",
-        .root_source_file = b.path("web/explore3d_wasm.zig"),
-        .target = wasm_target,
-        .optimize = .ReleaseSmall,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("web/explore3d_wasm.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        }),
     });
 
     // Add all module imports
@@ -221,9 +236,11 @@ pub fn build(b: *std.Build) void {
     // ==========================================================================
 
     const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);

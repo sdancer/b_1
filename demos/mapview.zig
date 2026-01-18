@@ -85,7 +85,9 @@ const Image = struct {
         const file = try std.fs.cwd().createFile(path, .{});
         defer file.close();
 
-        var writer = file.writer();
+        var buf: [4096]u8 = undefined;
+        var writer = file.writer(&buf);
+        const w_iface = &writer.interface;
 
         const w: u32 = @intCast(self.width);
         const h: u32 = @intCast(self.height);
@@ -99,24 +101,24 @@ const Image = struct {
         const file_size: u32 = 54 + pixel_data_size;
 
         // BMP File Header (14 bytes)
-        try writer.writeAll("BM"); // Signature
-        try writer.writeInt(u32, file_size, .little); // File size
-        try writer.writeInt(u16, 0, .little); // Reserved
-        try writer.writeInt(u16, 0, .little); // Reserved
-        try writer.writeInt(u32, 54, .little); // Pixel data offset
+        try w_iface.writeAll("BM"); // Signature
+        try w_iface.writeInt(u32, file_size, .little); // File size
+        try w_iface.writeInt(u16, 0, .little); // Reserved
+        try w_iface.writeInt(u16, 0, .little); // Reserved
+        try w_iface.writeInt(u32, 54, .little); // Pixel data offset
 
         // DIB Header (BITMAPINFOHEADER - 40 bytes)
-        try writer.writeInt(u32, 40, .little); // Header size
-        try writer.writeInt(i32, @intCast(w), .little); // Width
-        try writer.writeInt(i32, @intCast(h), .little); // Height (positive = bottom-up)
-        try writer.writeInt(u16, 1, .little); // Color planes
-        try writer.writeInt(u16, 24, .little); // Bits per pixel
-        try writer.writeInt(u32, 0, .little); // Compression (none)
-        try writer.writeInt(u32, pixel_data_size, .little); // Image size
-        try writer.writeInt(i32, 2835, .little); // X pixels per meter
-        try writer.writeInt(i32, 2835, .little); // Y pixels per meter
-        try writer.writeInt(u32, 0, .little); // Colors in color table
-        try writer.writeInt(u32, 0, .little); // Important colors
+        try w_iface.writeInt(u32, 40, .little); // Header size
+        try w_iface.writeInt(i32, @intCast(w), .little); // Width
+        try w_iface.writeInt(i32, @intCast(h), .little); // Height (positive = bottom-up)
+        try w_iface.writeInt(u16, 1, .little); // Color planes
+        try w_iface.writeInt(u16, 24, .little); // Bits per pixel
+        try w_iface.writeInt(u32, 0, .little); // Compression (none)
+        try w_iface.writeInt(u32, pixel_data_size, .little); // Image size
+        try w_iface.writeInt(i32, 2835, .little); // X pixels per meter
+        try w_iface.writeInt(i32, 2835, .little); // Y pixels per meter
+        try w_iface.writeInt(u32, 0, .little); // Colors in color table
+        try w_iface.writeInt(u32, 0, .little); // Important colors
 
         // Pixel data (bottom-up, BGR format)
         const pad_bytes = [_]u8{0} ** 3;
@@ -126,14 +128,15 @@ const Image = struct {
             for (0..self.width) |x| {
                 const pixel = self.pixels[y * self.width + x];
                 // BMP uses BGR order
-                try writer.writeByte(pixel.b);
-                try writer.writeByte(pixel.g);
-                try writer.writeByte(pixel.r);
+                try w_iface.writeByte(pixel.b);
+                try w_iface.writeByte(pixel.g);
+                try w_iface.writeByte(pixel.r);
             }
             if (padding > 0) {
-                try writer.writeAll(pad_bytes[0..padding]);
+                try w_iface.writeAll(pad_bytes[0..padding]);
             }
         }
+        try w_iface.flush();
     }
 };
 
