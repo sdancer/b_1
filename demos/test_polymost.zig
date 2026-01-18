@@ -99,11 +99,15 @@ pub fn main() !void {
                 if (pal_data.len >= 768) {
                     @memcpy(&globals.palette, pal_data[0..768]);
                     globals.numshades = 64; // Blood uses 64 shade levels
-                    std.debug.print("Palette loaded, first colors: [{},{},{}] [{},{},{}] [{},{},{}]\n", .{
-                        globals.palette[0], globals.palette[1], globals.palette[2],
-                        globals.palette[3], globals.palette[4], globals.palette[5],
-                        globals.palette[6], globals.palette[7], globals.palette[8],
-                    });
+                    std.debug.print("Palette loaded. Sample colors:\n", .{});
+                    // Print several palette entries to check for colors
+                    const indices = [_]usize{ 0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240 };
+                    for (indices) |i| {
+                        const r = globals.palette[i * 3 + 0];
+                        const g = globals.palette[i * 3 + 1];
+                        const b = globals.palette[i * 3 + 2];
+                        std.debug.print("  [{d:3}]: r={d:2} g={d:2} b={d:2}\n", .{ i, r, g, b });
+                    }
                 }
             } else |_| {
                 std.debug.print("Failed to extract palette\n", .{});

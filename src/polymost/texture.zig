@@ -231,9 +231,9 @@ pub fn uploadBasePalette(basepalnum: i32) void {
         const idx = i * 3;
         if (idx + 2 < globals.palette.len) {
             paletteData[i] = .{
-                .r = globals.palette[idx] << 2, // BUILD palettes are 6-bit
-                .g = globals.palette[idx + 1] << 2,
-                .b = globals.palette[idx + 2] << 2,
+                .r = globals.palette[idx],
+                .g = globals.palette[idx + 1],
+                .b = globals.palette[idx + 2],
                 .a = if (i == 255) 0 else 255, // Index 255 is typically transparent
             };
         } else {
@@ -406,13 +406,14 @@ pub fn gloadtile_art(
                 final_idx = lut[shade_offset + color_idx];
             }
 
-            // Look up in base palette (6-bit colors need to be shifted to 8-bit)
+            // Look up in base palette
+            // Note: Blood's palette is already 8-bit (unlike Duke3D which uses 6-bit)
             const pal_offset = @as(usize, final_idx) * 3;
             if (pal_offset + 2 < palette_data.len) {
                 rgba_buf[dst_idx] = .{
-                    .r = palette_data[pal_offset + 0] << 2,
-                    .g = palette_data[pal_offset + 1] << 2,
-                    .b = palette_data[pal_offset + 2] << 2,
+                    .r = palette_data[pal_offset + 0],
+                    .g = palette_data[pal_offset + 1],
+                    .b = palette_data[pal_offset + 2],
                     .a = 255,
                 };
             } else {
