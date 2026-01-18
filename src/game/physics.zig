@@ -151,11 +151,23 @@ pub fn applyVelocityCustom(sprite_idx: usize, xy_shift: u5, z_shift: u5) void {
 // Friction/Damping
 // =============================================================================
 
+/// Minimum velocity threshold - below this, velocity is zeroed
+/// Prevents infinite drift from floating point / integer precision issues
+pub const VELOCITY_STOP_THRESHOLD: i32 = 0x1000; // 4096
+
 /// Apply velocity damping (friction)
 /// NBlood uses different damping per surface type
 pub fn applyDamping(sprite_idx: usize, damping: i32) void {
     globals.xvel[sprite_idx] = mulscale.mulscale16(globals.xvel[sprite_idx], damping);
     globals.yvel[sprite_idx] = mulscale.mulscale16(globals.yvel[sprite_idx], damping);
+
+    // Zero out very small velocities to prevent infinite drift
+    if (mulscale.klabs(globals.xvel[sprite_idx]) < VELOCITY_STOP_THRESHOLD) {
+        globals.xvel[sprite_idx] = 0;
+    }
+    if (mulscale.klabs(globals.yvel[sprite_idx]) < VELOCITY_STOP_THRESHOLD) {
+        globals.yvel[sprite_idx] = 0;
+    }
 }
 
 /// Apply ground damping (standard ground friction)
@@ -369,9 +381,10 @@ pub const FixedTimestep = struct {
     const MAX_TICKS_PER_FRAME: u32 = 10;
 
     /// Input scale for NBlood-compatible movement
-    /// In NBlood, input is typically 0-127 for analog or fixed values for digital
-    /// We use a larger value since we apply posture accel which divides
-    pub const INPUT_MAGNITUDE: i32 = 0x8000; // Base input magnitude per tick
+    /// After posture accel (mulscale16 with 0x4000) and trig (mulscale30 with ~16383),
+    /// input is reduced by ~factor of 4 million. We need large input to compensate.
+    /// Velocity is then shifted right by 12 for position update.
+    pub const INPUT_MAGNITUDE: i32 = 0x400000; // 4194304 - large to compensate for shifts
 
     /// Initialize with player sprite index
     pub fn init(sprite_idx: usize) FixedTimestep {
