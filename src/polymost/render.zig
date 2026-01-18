@@ -328,6 +328,14 @@ pub var use_textures: bool = true;
 
 /// Draw floor or ceiling flat
 fn drawFlat(sectnum: usize, sec: *const types.SectorType, is_ceiling: bool) void {
+    // Check for parallax (sky) - bit 0 of ceilingstat/floorstat
+    // Parallax surfaces should show sky, not a textured flat
+    const stat = if (is_ceiling) sec.ceilingstat else sec.floorstat;
+    if ((stat & 1) != 0) {
+        // Parallax surface - skip drawing (TODO: implement sky rendering)
+        return;
+    }
+
     const startwall: usize = @intCast(sec.wallptr);
     const wallcount: usize = @intCast(sec.wallnum);
 
