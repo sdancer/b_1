@@ -413,9 +413,11 @@ pub fn main() !void {
         // Player sprite index (use 0 for player velocity tracking)
         const PLAYER_SPRITE_IDX: usize = 0;
 
-        // Input scaling - this gives a good movement feel
-        // Base input magnitude (scales with posture acceleration)
-        const INPUT_SCALE: i32 = @intFromFloat(0x10000 * dt * 30.0); // ~0x10000 at 30fps
+        // Input scaling - NBlood uses large raw values
+        // The physics system applies posture accel (0x4000) then mulscale30 with trig
+        // To get noticeable movement: input * 0x4000 >> 16 * 16383 >> 30 * damping >> 12
+        // We need input around 0x200000 to get decent movement after all the shifts
+        const INPUT_SCALE: i32 = @intFromFloat(0x200000 * dt * 60.0); // Large value for physics system
 
         // Turn and look speeds
         const turn_speed: i16 = @intFromFloat(512.0 * dt);
